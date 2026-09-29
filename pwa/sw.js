@@ -2,9 +2,9 @@
    tools/build_site.py fills in the versions and file lists (the __NAMES__ below). */
 'use strict';
 
-const APP_CACHE = 'dv-app-__APP_VERSION__';
-const DATA_CACHE = 'dv-data-__DATA_VERSION__';
-const CDN_CACHE = 'dv-cdn-v1';
+const APP_CACHE = 'daily-value-app-__APP_VERSION__';
+const DATA_CACHE = 'daily-value-data-__DATA_VERSION__';
+const CDN_CACHE = 'daily-value-cdn-v1';
 // The page, scripts and icons, stored at install so the app opens offline.
 const APP_FILES = __APP_FILES__;
 // Food data stored at install; the brand-name files are stored the first time they're used.
@@ -28,8 +28,9 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
+      // Every GitHub Pages site on this account shares one origin, so only this app's caches are touched.
       const keep = new Set([APP_CACHE, DATA_CACHE, CDN_CACHE]);
-      for (const k of await caches.keys()) if (k.startsWith('dv-') && !keep.has(k)) await caches.delete(k);
+      for (const k of await caches.keys()) if (k.startsWith('daily-value-') && !keep.has(k)) await caches.delete(k);
       await self.clients.claim();
     })()
   );
@@ -86,7 +87,8 @@ async function staleWhileRevalidate(req, event) {
   const cache = await caches.open(CDN_CACHE);
   const hit = await cache.match(req);
   const update = fetch(req).then((res) => {
-    if (res.ok || res.type === 'opaque') cache.put(req, res.clone()).catch(() => {});
+    // Only complete, successful responses are kept, so an error page never replaces a working library.
+    if (res.ok) cache.put(req, res.clone()).catch(() => {});
     return res;
   });
   if (hit) {

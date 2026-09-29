@@ -33,7 +33,7 @@ HEAD = """<!doctype html>
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0e0d">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Daily Value">
@@ -82,6 +82,14 @@ def build():
         sys.exit("index.html must load js/app.js exactly once")
     # pwa.js sets DV.pwa before the app first draws.
     page = page.replace(APP_SCRIPT, PWA_SCRIPT + "\n" + APP_SCRIPT)
+    # Load CDN files with CORS, so the service worker can check and store real responses (not opaque ones).
+    for old, new in (
+        ('<script src="https://cdn.jsdelivr.net/', '<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/'),
+        ('<link rel="stylesheet" href="https://fonts.googleapis.com/', '<link rel="stylesheet" crossorigin="anonymous" href="https://fonts.googleapis.com/'),
+    ):
+        if old not in page:
+            sys.exit("index.html no longer has " + old)
+        page = page.replace(old, new)
     with open(os.path.join(OUT, "index.html"), "w", encoding="utf-8", newline="\n") as f:
         f.write(HEAD + page.rstrip() + "\n</body>\n</html>\n")
 

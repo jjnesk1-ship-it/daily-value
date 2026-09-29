@@ -194,7 +194,7 @@
     return html`<div class="banner install-banner" role="note">
       <p>${P.canPrompt
         ? html`<b>Install Daily Value</b> for a home-screen icon, a full-screen view and offline use.`
-        : html`<b>Add Daily Value to your Home Screen:</b> tap Share <${Icon} name="share" size=${16} /> then <b>Add to Home Screen</b>. The Home Screen app keeps its own diary, so add it before you start logging.`}</p>
+        : html`<b>Add Daily Value to your Home Screen:</b> in Safari tap Share <${Icon} name="share" size=${16} /> (under ⋯ on iOS 26), then <b>Add to Home Screen</b>. The Home Screen app keeps its own diary, so add it before you start logging.`}</p>
       <div class="row gap8">
         ${P.canPrompt ? html`<button type="button" class="btn btn-invert" onClick=${() => P.prompt().then((r) => r === 'accepted' && hide())}>Install</button>` : null}
         <button type="button" class="btn btn-quiet" onClick=${hide}>${P.canPrompt ? 'Not now' : 'Got it'}</button>
@@ -2660,8 +2660,8 @@
         <button type="button" class="btn btn-primary top8" onClick=${() => P.prompt()}><${Icon} name="download" size=${16} /> Install Daily Value</button>`;
     else if (P.ios)
       body = html`<ol class="steps">
-        <li>In Safari, tap the Share button <${Icon} name="share" size=${16} />.</li>
-        <li>Choose <b>Add to Home Screen</b>. If you don’t see it, tap <b>More</b> first.</li>
+        <li>In Safari, tap the Share button <${Icon} name="share" size=${16} />. On iPhone with iOS 26 it’s in the <b>⋯</b> menu next to the address bar.</li>
+        <li>Choose <b>Add to Home Screen</b> (tap <b>More</b> if you don’t see it) and leave <b>Open as Web App</b> on.</li>
         <li>Tap <b>Add</b>. Daily Value then opens from its icon, full screen, and works offline.</li>
       </ol>`;
     else body = html`<p class="muted small">To install it, open this page in Chrome, Edge or Samsung Internet on Android, or Safari on iPhone and iPad. On a computer, Chrome and Edge show an install button in the address bar.</p>`;

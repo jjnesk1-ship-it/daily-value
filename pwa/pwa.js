@@ -60,7 +60,7 @@
       DV.actions.toast('A new version of Daily Value is ready.', { ms: 60000, action: { label: 'Reload', run: () => worker.postMessage('skip-waiting') } });
     window.addEventListener('load', () => {
       nav.serviceWorker
-        .register('sw.js')
+        .register('sw.js', { updateViaCache: 'none' })
         .then((reg) => {
           if (reg.waiting && nav.serviceWorker.controller) offer(reg.waiting);
           reg.addEventListener('updatefound', () => {
