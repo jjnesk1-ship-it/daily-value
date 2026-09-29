@@ -1,0 +1,11 @@
+# Local editor and preview settings
+.claude/
+__pycache__/
+*.pyc
+
+# Raw downloads and intermediate files used by tools/ (too large for the repository)
+*.zip
+*.gz
+*.jsonl
+offx/
+data/b.new/
