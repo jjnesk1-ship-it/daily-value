@@ -14,6 +14,15 @@ A nutrition tracker in the spirit of Cronometer and MyFitnessPal, styled after t
 - **Trends:** calories by source, body weight, the foods that supply the most calories, and a nutrient report.
 - **With Claude** (only when the page runs as a claude.ai artifact): describe or photograph a meal to log it, read a Nutrition Facts label into a custom food, and get a review of your day.
 
+## Install it on your phone
+
+Open **https://jjnesk1-ship-it.github.io/daily-value/** on your phone.
+
+- **iPhone or iPad:** in Safari, tap the Share button (on iPhone with iOS 26 it's in the **⋯** menu next to the address bar), choose **Add to Home Screen**, leave **Open as Web App** on, and tap **Add**. The Home Screen app keeps its own diary, separate from Safari's, so add it before you start logging.
+- **Android:** in Chrome, tap **Install** when the app offers it, or open the ⋮ menu and choose **Add to home screen** / **Install app**.
+
+The installed app opens full screen from its icon and works offline after the first visit. Its diary is saved on that device only. To move it to another device, or from Safari into the Home Screen app, use **Copy backup** and **Paste a backup** in Profile, or **Back up** and **Restore backup** with a file.
+
 ## Run it locally
 
 ```bash
@@ -38,7 +47,19 @@ Outside claude.ai the diary is saved in the browser (localStorage), and the Clau
 | `js/app.js` | Views and sheets |
 | `data/foods.txt` | USDA SR Legacy and FNDDS foods |
 | `data/b/` | Brand-name products: search index, records, barcodes and brands |
-| `tools/` | Scripts that build the data files |
+| `pwa/` | What the installable app adds: manifest, icons, service worker and install prompts |
+| `tools/` | Scripts that build the data files and the installable site |
+
+## Publishing the installable app
+
+The GitHub Pages site is built from the same files, with the pieces in `pwa/` added:
+
+```bash
+python tools/build_site.py --publish
+git push origin gh-pages
+```
+
+The build writes `_site/` and commits it to the `gh-pages` branch, which GitHub Pages serves. When the app's files change, installed copies offer a **Reload** the next time they open; the food data they've stored is kept unless the data files changed too.
 
 ## Rebuilding the food data
 

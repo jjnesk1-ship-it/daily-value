@@ -108,6 +108,7 @@
         <div class="wrap">
           <${MobileHeader} />
           ${S.mode === 'sample' ? html`<${SampleBanner} />` : null}
+          ${v === 'diary' ? html`<${InstallBanner} />` : null}
           ${v === 'diary'
             ? html`<${DiaryView} />`
             : v === 'foods'
@@ -179,6 +180,33 @@
       <button type="button" class="btn btn-invert" onClick=${() => A.open({ type: 'onboard' })}>Start my diary</button>
     </div>`;
   }
+  // Installable-app build only (DV.pwa, from pwa/pwa.js): a nudge on the diary to put the app on the
+  // home screen, hidden for a month when dismissed. On iPhone the Home Screen app keeps its own diary,
+  // apart from Safari's, which is why it shows even before a diary is started. A diary kept in a Safari tab
+  // can be erased by Safari after 7 days of not visiting, so then it says so and comes back after 3 days.
+  function InstallBanner() {
+    const P = DV.pwa;
+    const [hidden, setHidden] = useState(() => (DV.uiPrefs.read().installHiddenUntil || 0) > Date.now());
+    if (!P || P.installed || hidden || !(P.canPrompt || P.ios)) return null;
+    const atRisk = P.ios && S.mode === 'user';
+    const hide = () => {
+      DV.uiPrefs.write({ installHiddenUntil: Date.now() + (atRisk ? 3 : 30) * 86400000 });
+      setHidden(true);
+    };
+    const how = html`in Safari tap Share <${Icon} name="share" size=${16} /> (under ⋯ on iOS 26), then <b>Add to Home Screen</b>.`;
+    return html`<div class="banner install-banner" role="note">
+      <p>${P.canPrompt
+        ? html`<b>Install Daily Value</b> for a home-screen icon, a full-screen view and offline use.`
+        : atRisk
+        ? html`<b>Safari can erase this diary</b> if you go 7 days of using Safari without opening Daily Value. Add it to your Home Screen: ${how} Then move your entries with <b>Copy backup</b> here and <b>Paste a backup</b> in the app, both in Profile.`
+        : html`<b>Add Daily Value to your Home Screen:</b> ${how} The Home Screen app keeps its own diary, so add it before you start logging.`}</p>
+      <div class="row gap8">
+        ${P.canPrompt ? html`<button type="button" class="btn btn-invert" onClick=${() => P.prompt().then((r) => r === 'accepted' && hide())}>Install</button>` : null}
+        <button type="button" class="btn btn-quiet" onClick=${hide}>${P.canPrompt ? 'Not now' : 'Got it'}</button>
+      </div>
+    </div>`;
+  }
+
   function Toasts() {
     return html`<div class="toasts" role="status" aria-live="polite">
       ${UI.toasts.map(
@@ -220,6 +248,8 @@
         return html`<${GoalSheet} key=${k} nkey=${sh.key} back=${sh.back} onClose=${close} />`;
       case 'weight':
         return html`<${WeightSheet} key=${k} date=${sh.date} onClose=${close} />`;
+      case 'paste':
+        return html`<${PasteSheet} key=${k} onClose=${close} />`;
       case 'onboard':
         return html`<${OnboardSheet} key=${k} onClose=${close} />`;
       case 'review':
@@ -2435,22 +2465,86 @@
     </div>`;
   }
 
-  // Offer text as a file to save, or show it to copy where downloads aren't available.
+  // Offer text as a file: through claude.ai's downloads inside the artifact; elsewhere the share sheet on
+  // phones (Save to Files on iPhone) or an ordinary download; as a last resort, text to copy.
   async function saveTextFile(filename, data, title) {
-    let dl = null;
-    try {
-      dl = window.claude && window.claude.use ? await window.claude.use('downloads') : null;
-    } catch (e) {}
-    if (dl) {
+    if (window.claude && window.claude.use) {
+      let dl = null;
       try {
-        await dl.save({ filename, data });
-        A.toast('Saved ' + filename);
-        return;
-      } catch (e) {
-        if (e && e.code === 'declined') return;
+        dl = await window.claude.use('downloads');
+      } catch (e) {}
+      if (dl) {
+        try {
+          await dl.save({ filename, data });
+          A.toast('Saved ' + filename);
+          return;
+        } catch (e) {
+          if (e && e.code === 'declined') return;
+        }
       }
+    } else {
+      // Nothing is awaited before this point, so the tap still counts as permission for the share sheet.
+      const type = filename.endsWith('.json') ? 'application/json' : 'text/csv';
+      const file = new File([data], filename, { type });
+      if (coarsePointer() && navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: filename });
+          return;
+        } catch (e) {
+          if (e && e.name === 'AbortError') return; // closed the share sheet
+        }
+      }
+      try {
+        const url = URL.createObjectURL(file);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        A.toast('Downloading ' + filename);
+        return;
+      } catch (e) {}
     }
     A.open({ type: 'text', title, body: 'Downloads aren’t available here. Copy this text and save it as ' + filename + '.', text: data });
+  }
+
+  // Put a backup on the clipboard, to paste into the app on another device or into the Home Screen app.
+  async function copyBackup() {
+    const data = A.exportJSON();
+    try {
+      await navigator.clipboard.writeText(data);
+      A.toast('Backup copied. In the other app or browser, open Profile and tap Paste a backup.', { ms: 7000 });
+    } catch (e) {
+      A.open({ type: 'text', title: 'Backup', body: 'Copy all of this text, then paste it with Paste a backup in the other app or browser.', text: data });
+    }
+  }
+
+  function PasteSheet({ onClose }) {
+    const [text, setText] = useState('');
+    const [err, setErr] = useState('');
+    const run = () => {
+      try {
+        A.importJSON(text.trim());
+        onClose();
+        A.toast('Backup restored');
+      } catch (e) {
+        setErr(e instanceof SyntaxError ? 'That isn’t a whole backup. Copy all of the backup text and paste it again.' : e.message || 'That backup couldn’t be read.');
+      }
+    };
+    return html`<${Sheet} title="Paste a backup" onClose=${onClose} focus="#paste-in"
+      footer=${html`<button type="button" class="btn" onClick=${onClose}>Cancel</button>
+        <button type="button" class="btn btn-primary" disabled=${!text.trim()} onClick=${run}>Replace this diary</button>`}>
+      <div class="stack">
+        <p class="muted">Paste the text from Copy backup or Back up on your other device or browser. It replaces the diary, foods and settings here.</p>
+        <textarea id="paste-in" class="input mono" rows="10" aria-label="Backup text" value=${text} onInput=${(e) => {
+          setText(e.target.value);
+          setErr('');
+        }}></textarea>
+        ${err ? html`<p class="error" role="alert"><${Icon} name="alert" size=${16} /> ${err}</p>` : null}
+      </div>
+    <//>`;
   }
 
   // ---------------------------------------------------------------------------
@@ -2626,6 +2720,31 @@
     <//>`;
   }
 
+  // Installable-app build only: how to install on this device, or confirmation that it's installed.
+  function InstallCard() {
+    const P = DV.pwa;
+    if (!P) return null;
+    let body;
+    if (P.installed) body = html`<p class="good-note"><${Icon} name="check" size=${16} stroke=${3} /> You’re using the installed app.</p>`;
+    else if (P.canPrompt)
+      body = html`<p class="muted small">Adds Daily Value to your home screen and app list. It opens full screen and works offline.</p>
+        <button type="button" class="btn btn-primary top8" onClick=${() => P.prompt()}><${Icon} name="download" size=${16} /> Install Daily Value</button>`;
+    else if (P.ios)
+      body = html`<ol class="steps">
+        <li>In Safari, tap the Share button <${Icon} name="share" size=${16} />. On iPhone with iOS 26 it’s in the <b>⋯</b> menu next to the address bar.</li>
+        <li>Choose <b>Add to Home Screen</b> (tap <b>More</b> if you don’t see it) and leave <b>Open as Web App</b> on.</li>
+        <li>Tap <b>Add</b>. Daily Value then opens from its icon, full screen, and works offline.</li>
+      </ol>`;
+    else if (P.android)
+      body = html`<p class="muted small">Open your browser’s menu (⋮) and tap <b>Install app</b> or <b>Add to Home screen</b>. If Daily Value is already installed, tap <b>Open in app</b> there instead.</p>`;
+    else body = html`<p class="muted small">To install it, open this page in Chrome, Edge or Samsung Internet on Android, or Safari on iPhone and iPad. On a computer, Chrome and Edge show an install button in the address bar.</p>`;
+    return html`<section class="panel pad-panel top16" aria-label="Get the app">
+      <h2 class="h2">Get the app</h2>
+      ${body}
+      <p class="muted small top8">The app keeps its diary on this device${P.ios ? ', and on iPhone the Home Screen app’s diary is separate from Safari’s' : ''}. To move entries between the app, a browser or another device, use Copy backup and Paste a backup below, or Back up and Restore backup with a file.</p>
+    </section>`;
+  }
+
   function ProfileView() {
     const p = S.profile;
     const sys = p.units || 'imperial';
@@ -2712,6 +2831,8 @@
         </div>
       </section>
 
+      <${InstallCard} />
+
       <div class="profile-grid top16">
         <section class="panel pad-panel" aria-label="Your data">
           <h2 class="h2">Your data</h2>
@@ -2719,10 +2840,17 @@
           <p class="muted small">${S.backend === 'cloud'
             ? 'Your diary is stored with this page in your Claude account, in a private space only you can read, and syncs across your devices.'
             : 'Your diary is saved in this browser. Export a backup now and then so you don’t lose it if browser data is cleared.'}</p>
+          ${DV.pwa && DV.pwa.ios && !DV.pwa.installed && !sample
+            ? html`<p class="warn-note top8"><${Icon} name="alert" size=${16} /> Safari can erase this diary if you go 7 days of using Safari without opening Daily Value. Add it to your Home Screen (see Get the app above) and move your entries there with Copy backup and Paste a backup.</p>`
+            : null}
           <div class="row gap8 wrap top8">
             <button type="button" class="btn" disabled=${sample} onClick=${() => exportFile('json')}><${Icon} name="download" size=${16} /> Back up (JSON)</button>
             <button type="button" class="btn" disabled=${sample} onClick=${() => exportFile('csv')}><${Icon} name="download" size=${16} /> Export diary (CSV)</button>
             <label class="btn"><${Icon} name="upload" size=${16} /> Restore backup<input class="sr" type="file" accept=".json,application/json" onChange=${(e) => importFile(e.target.files && e.target.files[0])} /></label>
+          </div>
+          <div class="row gap8 wrap top8">
+            <button type="button" class="btn btn-sm" disabled=${sample} onClick=${copyBackup}><${Icon} name="copy" size=${16} /> Copy backup</button>
+            <button type="button" class="btn btn-sm" onClick=${() => A.open({ type: 'paste' })}><${Icon} name="list" size=${16} /> Paste a backup</button>
           </div>
           ${sample
             ? null

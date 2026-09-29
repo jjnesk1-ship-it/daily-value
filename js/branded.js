@@ -432,6 +432,7 @@
     if (!zxingP) {
       zxingP = new Promise((resolve, reject) => {
         const s = document.createElement('script');
+        s.crossOrigin = 'anonymous';
         s.src = 'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js';
         s.onload = () => (window.ZXing ? resolve(window.ZXing) : reject(new Error('Barcode reader failed to load')));
         s.onerror = () => {
