@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 
+# The installable-app build (published to the gh-pages branch by tools/build_site.py --publish)
+_site/
+
 # Raw downloads and intermediate files used by tools/ (too large for the repository)
 *.zip
 *.gz

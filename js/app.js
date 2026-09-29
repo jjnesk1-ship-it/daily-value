@@ -108,6 +108,7 @@
         <div class="wrap">
           <${MobileHeader} />
           ${S.mode === 'sample' ? html`<${SampleBanner} />` : null}
+          ${v === 'diary' ? html`<${InstallBanner} />` : null}
           ${v === 'diary'
             ? html`<${DiaryView} />`
             : v === 'foods'
@@ -179,6 +180,28 @@
       <button type="button" class="btn btn-invert" onClick=${() => A.open({ type: 'onboard' })}>Start my diary</button>
     </div>`;
   }
+  // Installable-app build only (DV.pwa, from pwa/pwa.js): a nudge on the diary to put the app on the
+  // home screen, hidden for a month when dismissed. On iPhone the Home Screen app keeps its own diary,
+  // apart from Safari's, which is why it shows even before a diary is started.
+  function InstallBanner() {
+    const P = DV.pwa;
+    const [hidden, setHidden] = useState(() => (DV.uiPrefs.read().installHiddenUntil || 0) > Date.now());
+    if (!P || P.installed || hidden || !(P.canPrompt || P.ios)) return null;
+    const hide = () => {
+      DV.uiPrefs.write({ installHiddenUntil: Date.now() + 30 * 86400000 });
+      setHidden(true);
+    };
+    return html`<div class="banner install-banner" role="note">
+      <p>${P.canPrompt
+        ? html`<b>Install Daily Value</b> for a home-screen icon, a full-screen view and offline use.`
+        : html`<b>Add Daily Value to your Home Screen:</b> tap Share <${Icon} name="share" size=${16} /> then <b>Add to Home Screen</b>. The Home Screen app keeps its own diary, so add it before you start logging.`}</p>
+      <div class="row gap8">
+        ${P.canPrompt ? html`<button type="button" class="btn btn-invert" onClick=${() => P.prompt().then((r) => r === 'accepted' && hide())}>Install</button>` : null}
+        <button type="button" class="btn btn-quiet" onClick=${hide}>${P.canPrompt ? 'Not now' : 'Got it'}</button>
+      </div>
+    </div>`;
+  }
+
   function Toasts() {
     return html`<div class="toasts" role="status" aria-live="polite">
       ${UI.toasts.map(
@@ -2626,6 +2649,29 @@
     <//>`;
   }
 
+  // Installable-app build only: how to install on this device, or confirmation that it's installed.
+  function InstallCard() {
+    const P = DV.pwa;
+    if (!P) return null;
+    let body;
+    if (P.installed) body = html`<p class="good-note"><${Icon} name="check" size=${16} stroke=${3} /> You’re using the installed app.</p>`;
+    else if (P.canPrompt)
+      body = html`<p class="muted small">Adds Daily Value to your home screen and app list. It opens full screen and works offline.</p>
+        <button type="button" class="btn btn-primary top8" onClick=${() => P.prompt()}><${Icon} name="download" size=${16} /> Install Daily Value</button>`;
+    else if (P.ios)
+      body = html`<ol class="steps">
+        <li>In Safari, tap the Share button <${Icon} name="share" size=${16} />.</li>
+        <li>Choose <b>Add to Home Screen</b>. If you don’t see it, tap <b>More</b> first.</li>
+        <li>Tap <b>Add</b>. Daily Value then opens from its icon, full screen, and works offline.</li>
+      </ol>`;
+    else body = html`<p class="muted small">To install it, open this page in Chrome, Edge or Samsung Internet on Android, or Safari on iPhone and iPad. On a computer, Chrome and Edge show an install button in the address bar.</p>`;
+    return html`<section class="panel pad-panel top16" aria-label="Get the app">
+      <h2 class="h2">Get the app</h2>
+      ${body}
+      <p class="muted small top8">The app keeps its diary on this device${P.ios ? ', and on iPhone the Home Screen app’s diary is separate from Safari’s' : ''}. To move entries between the app, a browser or another device, use Back up and Restore backup below.</p>
+    </section>`;
+  }
+
   function ProfileView() {
     const p = S.profile;
     const sys = p.units || 'imperial';
@@ -2711,6 +2757,8 @@
           </div>`)}
         </div>
       </section>
+
+      <${InstallCard} />
 
       <div class="profile-grid top16">
         <section class="panel pad-panel" aria-label="Your data">
