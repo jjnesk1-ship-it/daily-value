@@ -49,20 +49,36 @@
   // Offline support. A new version waits until the person chooses to reload, so nothing changes mid-entry.
   if ('serviceWorker' in nav) {
     const hadController = !!nav.serviceWorker.controller;
+    let wanted = false; // the person tapped Reload
     let reloading = false;
     nav.serviceWorker.addEventListener('controllerchange', () => {
-      // The first install takes control without a reload; only updates reload the page.
-      if (!hadController || reloading) return;
+      // The first install takes control without a reload; an update reloads so page and worker match.
+      if (reloading || !(hadController || wanted)) return;
       reloading = true;
       window.location.reload();
     });
-    const offer = (worker) =>
-      DV.actions.toast('A new version of Daily Value is ready.', { ms: 60000, action: { label: 'Reload', run: () => worker.postMessage('skip-waiting') } });
+    let offeredAt = 0;
+    const offer = (worker) => {
+      // At most one notice a minute; it comes back later if other messages pushed it away.
+      if (Date.now() - offeredAt < 60000) return;
+      offeredAt = Date.now();
+      DV.actions.toast('A new version of Daily Value is ready.', {
+        ms: 60000,
+        action: {
+          label: 'Reload',
+          run: () => {
+            wanted = true;
+            worker.postMessage('skip-waiting');
+          },
+        },
+      });
+    };
     window.addEventListener('load', () => {
       nav.serviceWorker
         .register('sw.js', { updateViaCache: 'none' })
         .then((reg) => {
-          if (reg.waiting && nav.serviceWorker.controller) offer(reg.waiting);
+          const offerWaiting = () => reg.waiting && nav.serviceWorker.controller && offer(reg.waiting);
+          offerWaiting();
           reg.addEventListener('updatefound', () => {
             const w = reg.installing;
             if (!w) return;
@@ -70,9 +86,11 @@
               if (w.state === 'installed' && nav.serviceWorker.controller) offer(w);
             });
           });
-          // An installed app can stay open for days; look for updates when it comes back to the front.
+          // An installed app can stay open for days: look for updates whenever it comes back to the front,
+          // and offer again one that's already waiting.
           document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible') reg.update().catch(() => {});
+            if (document.visibilityState !== 'visible') return;
+            reg.update().catch(() => {}).then(offerWaiting);
           });
         })
         .catch(() => {});
@@ -80,10 +98,10 @@
   }
 
   // Once there's a real diary, ask the browser not to clear this site's storage when space runs low.
-  let asked = false;
+  let persistAsked = false;
   DV.subscribe(() => {
-    if (asked || DV.state.mode !== 'user') return;
-    asked = true;
+    if (persistAsked || DV.state.mode !== 'user') return;
+    persistAsked = true;
     if (nav.storage && nav.storage.persist) nav.storage.persist().catch(() => {});
   });
 })();

@@ -11,8 +11,10 @@ Usage:
 """
 
 import hashlib
+import html
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +25,8 @@ PWA = os.path.join(ROOT, "pwa")
 
 # The same small reset the artifact host adds (see tools/dev_server.py), plus what an
 # installable app needs: the manifest, icons, theme colors and home-screen settings.
+# viewport-fit=cover lets the app run edge to edge, so the root keeps clear of the
+# notch and home indicator on every side.
 HEAD = """<!doctype html>
 <html lang="en">
 <head>
@@ -38,7 +42,7 @@ HEAD = """<!doctype html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Daily Value">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif;background:#fafaf8}img{max-width:100%}[hidden]{display:none!important}</style>
+<style>:root{color-scheme:light;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}body{margin:0;font:14px system-ui,sans-serif;background:#fafaf8}img{max-width:100%}[hidden]{display:none!important}</style>
 </head>
 <body>
 """
@@ -47,37 +51,66 @@ APP_SCRIPT = '<script src="js/app.js"></script>'
 PWA_SCRIPT = '<script src="js/pwa.js"></script>'
 # Stored when the app is installed; the other data files are stored the first time they're used.
 DATA_AT_INSTALL = ["data/foods.txt", "data/b/meta.json"]
+# Written with LF line endings whatever the checkout uses, so the same commit always builds the same bytes.
+TEXT_TYPES = {".html", ".js", ".json", ".webmanifest", ".txt", ".css", ".csv", ".md"}
+ZXING_URL = re.compile(r"https://cdn\.jsdelivr\.net/npm/@zxing/[^'\"\s]+")
+CDN_SCRIPT = re.compile(r'<script crossorigin="anonymous" src="(https://[^"]+)"')
+CDN_STYLE = re.compile(r'<link rel="stylesheet" crossorigin="anonymous" href="(https://[^"]+)"')
 
 
-def files_under(base, sub):
-    out = []
-    for dirpath, _, names in os.walk(os.path.join(base, sub)):
-        for n in names:
-            out.append(os.path.relpath(os.path.join(dirpath, n), base).replace(os.sep, "/"))
-    return sorted(out)
+def git(*args, env=None, check=True):
+    r = subprocess.run(["git", *args], cwd=ROOT, env=env, capture_output=True, text=True)
+    if check and r.returncode:
+        sys.exit("git " + " ".join(args) + " failed:\n" + r.stderr)
+    return r.stdout.strip()
 
 
-def digest(base, paths):
-    h = hashlib.sha256()
-    for p in paths:
-        h.update(p.encode("utf-8") + b"\0")
-        with open(os.path.join(base, p), "rb") as f:
-            h.update(f.read())
-    return h.hexdigest()[:12]
+def tracked(*paths):
+    """Files git tracks under these paths, so stray, ignored or half-built files never get published."""
+    return sorted(p for p in git("ls-files", "-z", "--", *paths).split("\0") if p)
+
+
+def put(src, dest, data=None):
+    """Copy src (relative to the project) to dest (relative to _site/), or write data; text gets LF endings."""
+    if data is None:
+        with open(os.path.join(ROOT, src), "rb") as f:
+            data = f.read()
+    if os.path.splitext(dest)[1] in TEXT_TYPES:
+        data = data.replace(b"\r\n", b"\n")
+    path = os.path.join(OUT, dest)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+def sha256(dest):
+    with open(os.path.join(OUT, dest), "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def version(paths, hashes):
+    return hashlib.sha256("".join(p + hashes[p] for p in paths).encode("utf-8")).hexdigest()[:12]
 
 
 def build():
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
     os.makedirs(OUT)
-    shutil.copytree(os.path.join(ROOT, "js"), os.path.join(OUT, "js"))
-    shutil.copytree(os.path.join(ROOT, "data"), os.path.join(OUT, "data"))
-    shutil.copytree(os.path.join(PWA, "icons"), os.path.join(OUT, "icons"))
-    shutil.copyfile(os.path.join(PWA, "pwa.js"), os.path.join(OUT, "js", "pwa.js"))
-    shutil.copyfile(os.path.join(PWA, "manifest.webmanifest"), os.path.join(OUT, "manifest.webmanifest"))
+    data_files = tracked("data")
+    js_files = tracked("js")
+    if "data/foods.txt" not in data_files or "js/app.js" not in js_files:
+        sys.exit("js/ and data/ need to be committed before building")
+    for p in data_files + js_files:
+        put(p, p)
+    icons = []
+    for p in tracked("pwa/icons"):
+        icons.append("icons/" + os.path.basename(p))
+        put(p, icons[-1])
+    put("pwa/pwa.js", "js/pwa.js")
+    put("pwa/manifest.webmanifest", "manifest.webmanifest")
 
     with open(os.path.join(ROOT, "index.html"), encoding="utf-8") as f:
-        page = f.read()
+        page = f.read().replace("\r\n", "\n")
     if page.count(APP_SCRIPT) != 1:
         sys.exit("index.html must load js/app.js exactly once")
     # pwa.js sets DV.pwa before the app first draws.
@@ -90,45 +123,69 @@ def build():
         if old not in page:
             sys.exit("index.html no longer has " + old)
         page = page.replace(old, new)
-    with open(os.path.join(OUT, "index.html"), "w", encoding="utf-8", newline="\n") as f:
-        f.write(HEAD + page.rstrip() + "\n</body>\n</html>\n")
+    put(None, "index.html", (HEAD + page.rstrip() + "\n</body>\n</html>\n").encode("utf-8"))
 
-    app_files = ["index.html", "manifest.webmanifest"] + files_under(OUT, "js") + files_under(OUT, "icons")
-    data_files = files_under(OUT, "data")
+    # Files from other sites for the worker to store at install: the page's scripts (required, since Preact
+    # draws everything), its font stylesheet, and the ZXing barcode reader js/branded.js loads when needed.
+    cdn = [[html.unescape(u), True] for u in CDN_SCRIPT.findall(page)]
+    cdn += [[html.unescape(u), False] for u in CDN_STYLE.findall(page)]
+    with open(os.path.join(ROOT, "js", "branded.js"), encoding="utf-8") as f:
+        cdn += [[u, False] for u in sorted(set(ZXING_URL.findall(f.read())))]
+    if not cdn or not cdn[0][1]:
+        sys.exit("couldn't find the page's library scripts in index.html")
+
+    app_files = ["index.html", "manifest.webmanifest"] + sorted(["js/pwa.js"] + js_files) + icons
+    hashes = {p: sha256(p) for p in app_files + data_files}
     with open(os.path.join(PWA, "sw.js"), encoding="utf-8") as f:
         sw = f.read()
-    sw = (
-        sw.replace("__APP_VERSION__", digest(OUT, app_files))
-        .replace("__DATA_VERSION__", digest(OUT, data_files))
-        .replace("__APP_FILES__", json.dumps(app_files))
-        .replace("__DATA_FILES__", json.dumps(DATA_AT_INSTALL))
-    )
-    with open(os.path.join(OUT, "sw.js"), "w", encoding="utf-8", newline="\n") as f:
-        f.write(sw)
+    for name, value in (
+        ("__APP_VERSION__", version(app_files, hashes)),
+        ("__DATA_VERSION__", version(data_files, hashes)),
+        ("__HASHES__", json.dumps({p: h[:16] for p, h in hashes.items()}, separators=(",", ":"))),
+        ("__APP_FILES__", json.dumps(app_files)),
+        ("__DATA_FILES__", json.dumps(DATA_AT_INSTALL)),
+        ("__CDN_FILES__", json.dumps(cdn)),
+    ):
+        if name not in sw:
+            sys.exit("pwa/sw.js is missing " + name)
+        sw = sw.replace(name, value)
+    put(None, "sw.js", sw.encode("utf-8"))
     # Serve every file as is (no Jekyll processing on GitHub Pages).
-    open(os.path.join(OUT, ".nojekyll"), "w").close()
-    size = sum(os.path.getsize(os.path.join(OUT, p)) for p in files_under(OUT, ""))
-    print(f"Built _site/: {len(app_files)} app files, {len(data_files)} data files, {size / 1e6:.1f} MB")
+    put(None, ".nojekyll", b"")
+    size = sum(os.path.getsize(os.path.join(dp, n)) for dp, _, ns in os.walk(OUT) for n in ns)
+    print(f"Built _site/: {len(app_files)} app files, {len(data_files)} data files, {len(cdn)} CDN files, {size / 1e6:.1f} MB")
 
 
-def git(*args, env=None, check=True):
-    r = subprocess.run(["git", *args], cwd=ROOT, env=env, capture_output=True, text=True)
-    if check and r.returncode:
-        sys.exit("git " + " ".join(args) + " failed:\n" + r.stderr)
-    return r.stdout.strip()
+def is_ancestor(a, b):
+    return subprocess.run(["git", "merge-base", "--is-ancestor", a, b], cwd=ROOT, capture_output=True).returncode == 0
+
+
+def pages_parent():
+    """The commit to build on: the newer of the local and remote gh-pages, so the push fast-forwards."""
+    git("fetch", "-q", "origin", "gh-pages", check=False)  # fine when there's no remote branch yet
+    local = git("rev-parse", "--verify", "-q", "refs/heads/gh-pages^{commit}", check=False)
+    remote = git("rev-parse", "--verify", "-q", "refs/remotes/origin/gh-pages^{commit}", check=False)
+    if not local or not remote:
+        return local or remote
+    if is_ancestor(local, remote):
+        return remote
+    if is_ancestor(remote, local):
+        return local
+    sys.exit("Your gh-pages branch and origin/gh-pages have diverged; sort that out before publishing.")
 
 
 def publish():
-    """Commit _site/ as the next gh-pages commit, without touching the working branch."""
-    env = dict(os.environ, GIT_INDEX_FILE=os.path.join(ROOT, ".git", "pages-index"))
+    """Commit _site/ as the next gh-pages commit, without touching the working branch or its index."""
+    index = git("rev-parse", "--git-path", "pages-index")  # inside .git, and right in linked worktrees too
+    env = dict(os.environ, GIT_INDEX_FILE=index if os.path.isabs(index) else os.path.join(ROOT, index))
     git("--work-tree", OUT, "add", "-A", ".", env=env)
     tree = git("write-tree", env=env)
-    parent = git("rev-parse", "--verify", "-q", "refs/heads/gh-pages^{commit}", check=False)
+    parent = pages_parent()
     if parent and git("rev-parse", parent + "^{tree}") == tree:
+        git("update-ref", "refs/heads/gh-pages", parent)
         print("gh-pages already has this build.")
         return
-    source = git("rev-parse", "--short", "HEAD")
-    args = ["commit-tree", tree, "-m", "Build site from " + source]
+    args = ["commit-tree", tree, "-m", "Build site from " + git("rev-parse", "--short", "HEAD")]
     if parent:
         args += ["-p", parent]
     commit = git(*args)

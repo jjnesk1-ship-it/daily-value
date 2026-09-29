@@ -21,7 +21,7 @@ Open **https://jjnesk1-ship-it.github.io/daily-value/** on your phone.
 - **iPhone or iPad:** in Safari, tap the Share button (on iPhone with iOS 26 it's in the **⋯** menu next to the address bar), choose **Add to Home Screen**, leave **Open as Web App** on, and tap **Add**. The Home Screen app keeps its own diary, separate from Safari's, so add it before you start logging.
 - **Android:** in Chrome, tap **Install** when the app offers it, or open the ⋮ menu and choose **Add to home screen** / **Install app**.
 
-The installed app opens full screen from its icon and works offline after the first visit. Its diary is saved on that device only; use **Back up** and **Restore backup** in Profile to move it to another device.
+The installed app opens full screen from its icon and works offline after the first visit. Its diary is saved on that device only. To move it to another device, or from Safari into the Home Screen app, use **Copy backup** and **Paste a backup** in Profile, or **Back up** and **Restore backup** with a file.
 
 ## Run it locally
 
