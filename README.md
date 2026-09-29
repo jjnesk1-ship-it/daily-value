@@ -58,4 +58,8 @@ The raw downloads are not in the repository; each script's header describes its 
 - **Targets** follow the National Academies' Dietary Reference Intakes. Exercise estimates use MET values from the Compendium of Physical Activities.
 - **Libraries** are loaded from CDNs at runtime: [Preact](https://preactjs.com) with [htm](https://github.com/developit/htm) (MIT) and [ZXing](https://github.com/zxing-js/library) (Apache 2.0) for barcode reading.
 
+## License
+
+The code (`index.html`, `js/` and `tools/`) is released under the [MIT License](LICENSE). The food data in `data/` keeps the licenses of its sources, listed above.
+
 Daily Value is for general tracking and isn't medical advice.
