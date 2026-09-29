@@ -1,0 +1,2 @@
+# Keep LF everywhere: the app splits its data files on newline characters.
+* text=auto eol=lf
