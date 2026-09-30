@@ -3,8 +3,8 @@
    Leave them empty and each device simply keeps its own diary. */
 window.DV_CONFIG = {
   // Project URL, like https://abcdefghijklmnop.supabase.co (the project's Connect button shows it)
-  supabaseUrl: '',
+  supabaseUrl: 'https://gdbcgzlbrmugghedqkwx.supabase.co',
   // The publishable key (sb_publishable_…). It's meant to be public: what each account can read and
   // write is enforced by the database's row-level security (supabase/schema.sql). Never a secret key.
-  supabaseKey: '',
+  supabaseKey: 'sb_publishable_1nIiE4evaqLK1CvU7QGYCw_Fa3_hj7H',
 };
