@@ -10,6 +10,7 @@ Usage:
                                         (then run: git push origin gh-pages)
 """
 
+import base64
 import hashlib
 import html
 import json
@@ -93,7 +94,26 @@ def version(paths, hashes):
     return hashlib.sha256("".join(p + hashes[p] for p in paths).encode("utf-8")).hexdigest()[:12]
 
 
+def check_key():
+    """Refuse to publish a secret Supabase key: it bypasses row-level security, and this site is public."""
+    with open(os.path.join(PWA, "config.js"), encoding="utf-8") as f:
+        m = re.search(r"supabaseKey:\s*'([^']*)'", f.read())
+    key = m.group(1) if m else ""
+    if not key or key.startswith("sb_publishable_"):
+        return
+    role = None
+    parts = key.split(".")
+    if len(parts) == 3:
+        try:
+            role = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))).get("role")
+        except ValueError:
+            pass
+    if role != "anon":
+        sys.exit("pwa/config.js has a secret Supabase key. Use the publishable key (sb_publishable_...) and rotate the secret one.")
+
+
 def build():
+    check_key()
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
     os.makedirs(OUT)

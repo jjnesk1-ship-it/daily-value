@@ -25,16 +25,23 @@ The installed app opens full screen from its icon and works offline after the fi
 
 ## Email accounts
 
-In the installable app, signing in with an email keeps a diary in an account and syncs it between devices. Sign-in is a 6-digit code sent by email, with no password. The claude.ai version keeps syncing through the Claude account instead.
+In the installable app, signing in with an email keeps a diary in an account and syncs it between devices. People sign in with a one-time code from an email; there's no password. The claude.ai version keeps syncing through the Claude account instead.
 
 Accounts use a free [Supabase](https://supabase.com) project and stay switched off until `pwa/config.js` has its details:
 
-1. Create a project on supabase.com.
-2. In **SQL Editor**, run [`supabase/schema.sql`](supabase/schema.sql). It creates the `dv_docs` table, the row-level security that limits each account to its own rows, and a function for deleting an account.
-3. In **Authentication → Emails**, edit the **Magic Link** template so the email shows the code, for example `<p>Your Daily Value code: <strong>{{ .Token }}</strong></p>`.
-4. In **Project Settings → API**, copy the Project URL and the publishable (anon) key into `pwa/config.js`, then publish (see below).
+1. **Create a project** on supabase.com.
+2. **Set up the database:** in **SQL Editor**, run [`supabase/schema.sql`](supabase/schema.sql). It creates the `dv_docs` table, the row-level security that limits each account to its own rows, a storage limit per account (5,000 documents, 20 MB), and a function for deleting an account.
+3. **Point sign-in links at the app:** in **Authentication → URL Configuration**, set **Site URL** to `https://jjnesk1-ship-it.github.io/daily-value/`.
+4. **Connect the app:** click **Connect** at the top of the project page (or open **Settings → API Keys**) and copy the **Project URL** and the **Publishable key** (`sb_publishable_…`) into `pwa/config.js`, then publish (see below). Never use a secret key: the app refuses one, and one committed to this public repo would need rotating.
 
-Supabase's built-in email service is meant for testing: it sends only a few emails an hour and may only deliver to your project team's addresses. For other people to sign in, add your own email provider under **Authentication → Emails → SMTP settings**. Free projects are paused after a week without use; restore them from the Supabase dashboard.
+**Codes or links.** Supabase's default emails carry a sign-in link rather than a code, and new free projects can't change their email templates until they use their own email provider. The app accepts either way:
+
+- **A code** works everywhere. To send codes, set up your own email provider (next paragraph), then in **Authentication → Emails → Templates** put `{{ .Token }}` in both **Confirm sign up** and **Magic link or OTP** (for example `<p>Your Daily Value code: <strong>{{ .Token }}</strong></p>`) and remove the link. Codes may be 6 or 8 digits; set **Email OTP Length** under **Authentication → Sign In / Providers → Email** if you prefer.
+- **A link** can be tapped on a computer or an Android phone. The installed iPhone app keeps its own storage, so there, copy the link from the email and paste it into the app's sign-in screen.
+
+**Who can sign in.** Without your own email provider, Supabase only emails the members of your Supabase team (so, you), about 2 emails an hour. For anyone else to sign in, add a provider such as Resend, Postmark or Amazon SES under **Authentication → Emails → SMTP Settings**. You'll need a domain you can verify with it. Before opening sign-in to others, also consider turning on CAPTCHA under **Authentication → Attack Protection**, and serving the app from its own domain rather than a shared `github.io` address.
+
+**Free-plan limits.** A project is paused after about a week without use (normal syncing counts as use); resume it from the Supabase dashboard and nothing is lost.
 
 ## Run it locally
 

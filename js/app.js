@@ -2727,23 +2727,54 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Email accounts (installable app only; js/account.js). Sign-in is a one-time code sent by email.
+  // Email accounts (installable app only; js/account.js). Sign-in is a one-time code sent by email, or the
+  // sign-in link in that email when the project's emails carry a link instead.
   const canSignIn = () => !!(DV.account && DV.account.configured && !DV.account.signedIn);
   function accountMessage(e) {
     switch (e && e.code) {
       case 'rate_limited':
-        return 'Too many codes have been sent. Wait a few minutes, then try again.';
+        return 'Too many sign-in emails have been sent. Wait a few minutes, then try again.';
       case 'bad_code':
-        return 'That code is wrong or has expired. Check the newest email, or send a new code.';
+        return 'That code or link is wrong, already used, or expired. Use the newest email, or send a new one.';
       case 'bad_email':
         return 'That doesn’t look like an email address. Check it and try again.';
       case 'not_authorized':
-        return 'The app can’t email this address yet: its email service only sends to addresses its owner has approved.';
+        return 'The app can’t email this address yet: until its owner sets up an email service, it only sends to the owner’s own address.';
+      case 'signups_closed':
+        return 'This copy of the app isn’t taking new accounts. Use the email you signed up with.';
+      case 'setup':
+      case 'unauthenticated':
+        return 'The account service isn’t set up correctly for this app yet.';
       case 'unavailable':
         return 'Couldn’t reach the account service. Check your connection and try again.';
       default:
         return (e && e.message) || 'Something went wrong. Try again.';
     }
+  }
+  // After signing in (with a code here, or a tapped link on start-up): load the account's diary, or set one up.
+  async function afterSignIn(hadDiary) {
+    const AC = DV.account;
+    const ok = await A.connectAccount();
+    if (!ok) {
+      A.toast('Signed in as ' + AC.email + '. Your diary will load as soon as your account can be reached.', { ms: 7000 });
+      return false;
+    }
+    if (S.mode === 'user') A.toast('Signed in as ' + AC.email + (hadDiary ? '. This device’s diary is now in your account.' : '.'), { ms: 6000 });
+    else {
+      // A new account: set up the diary next.
+      A.open({ type: 'onboard' });
+      A.toast('Signed in as ' + AC.email + '. Set up your diary to start.', { ms: 6000 });
+    }
+    return true;
+  }
+  // A tapped sign-in link comes back to the app with the session in the address.
+  function finishLinkSignIn() {
+    const AC = DV.account;
+    if (!AC || !AC.configured) return;
+    const hadDiary = S.mode === 'user';
+    AC.finishLinkSignIn()
+      .then((done) => done && afterSignIn(hadDiary))
+      .catch((e) => A.toast(accountMessage(e), { ms: 8000 }));
   }
 
   function AccountCard() {
@@ -2760,19 +2791,32 @@
         </div>
       </section>`;
     }
-    const signOut = () => {
-      const n = A.unsynced();
+    const done = () => A.toast('Signed out');
+    const signOut = () =>
       A.open({
         type: 'confirm',
         title: 'Sign out?',
-        body:
-          'Your diary stays in your account. This device goes back to the example diary until you sign in again.' +
-          (n ? ' ' + n + (n === 1 ? ' change hasn’t' : ' changes haven’t') + ' synced yet. They’re sent first if there’s a connection; otherwise they’re lost.' : ''),
+        body: 'Your diary stays in your account. This device goes back to the example diary until you sign in again.',
         confirm: 'Sign out',
-        danger: n > 0,
-        run: () => A.signOut().then(() => A.toast('Signed out')),
+        run: () =>
+          A.signOut().then((r) => {
+            if (!r.unsent) return done();
+            // Pending changes couldn't be sent: say so before anything is lost.
+            A.open({
+              type: 'confirm',
+              title: 'Some changes haven’t synced',
+              body:
+                r.unsent +
+                (r.unsent === 1 ? ' change' : ' changes') +
+                ' on this device couldn’t be sent to your account. If you sign out now, ' +
+                (r.unsent === 1 ? 'it’s' : 'they’re') +
+                ' lost. Try again when you’re connected, or sign out anyway.',
+              confirm: 'Sign out anyway',
+              danger: true,
+              run: () => A.signOut({ force: true }).then(done),
+            });
+          }),
       });
-    };
     const del = () =>
       A.open({
         type: 'confirm',
@@ -2803,9 +2847,10 @@
 
   function SignInSheet({ onClose }) {
     const AC = DV.account;
-    const [step, setStep] = useState('email'); // email | code
+    const [step, setStep] = useState('email'); // email | code | waiting
     const [email, setEmail] = useState(() => S.acctEmail || DV.uiPrefs.read().lastEmail || '');
     const [code, setCode] = useState('');
+    const [linkMode, setLinkMode] = useState(false); // the email had a link rather than a code
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
     const [sentAt, setSentAt] = useState(0);
@@ -2816,13 +2861,14 @@
       if (el) el.focus();
       const t = setInterval(() => setNow(Date.now()), 1000);
       return () => clearInterval(t);
-    }, [step]);
+    }, [step, linkMode]);
     if (!AC || !AC.configured) return html`<${Sheet} title="Sign in" onClose=${onClose}><p>Accounts aren’t set up for this copy of the app.</p><//>`;
     const addr = email.trim();
     const okEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addr);
-    const digits = code.replace(/\D/g, '');
-    const okCode = /^\d{6,10}$/.test(digits);
+    const entry = linkMode ? code.trim() : code.replace(/\D/g, '');
+    const okEntry = linkMode ? AC.isLink(entry) : /^\d{6,10}$/.test(entry);
     const wait = Math.max(0, 60 - Math.floor((now - sentAt) / 1000));
+    const unsynced = A.unsynced();
     const send = async (e) => {
       if (e) e.preventDefault();
       if (!okEmail || busy) return;
@@ -2842,28 +2888,30 @@
     };
     const verify = async (e) => {
       if (e) e.preventDefault();
-      if (!okCode || busy) return;
+      if (!okEntry || busy) return;
       setBusy(true);
       setErr('');
       const hadDiary = S.mode === 'user';
       try {
-        await AC.verifyCode(addr, digits);
+        await AC.verifyCode(addr, entry);
       } catch (x) {
         setErr(accountMessage(x));
         setBusy(false);
         return;
       }
-      await A.connectAccount();
-      if (S.mode === 'user') {
-        onClose();
-        A.toast('Signed in as ' + AC.email + (hadDiary ? '. This device’s diary is now in your account.' : '.'), { ms: 6000 });
-      } else {
-        // A new account: set up the diary next.
-        A.open({ type: 'onboard' });
-        A.toast('Signed in as ' + AC.email + '. Set up your diary to start.', { ms: 6000 });
+      const connected = await afterSignIn(hadDiary);
+      if (connected && S.mode === 'user') onClose();
+      else if (!connected) {
+        setBusy(false);
+        setStep('waiting');
       }
     };
     const error = err ? html`<p class="error" role="alert"><${Icon} name="alert" size=${16} /> ${err}</p>` : null;
+    if (step === 'waiting') {
+      return html`<${Sheet} title="Signed in" onClose=${onClose} footer=${html`<button type="button" class="btn btn-primary" onClick=${onClose}>OK</button>`}>
+        <p class="lede">You’re signed in as <b>${AC.email}</b>, but your account couldn’t be reached just now. Your diary will load and sync on its own once the connection is back.</p>
+      <//>`;
+    }
     if (step === 'email') {
       return html`<${Sheet} title="Sign in" onClose=${onClose} focus="#si-email">
         <form class="stack" onSubmit=${send}>
@@ -2874,26 +2922,33 @@
           <button type="submit" class="btn btn-primary" disabled=${!okEmail || busy}>${busy ? html`<${Spinner} /> Sending…` : 'Email me a code'}</button>
           ${error}
           ${S.mode === 'user' && S.acctEmail && okEmail && addr.toLowerCase() !== S.acctEmail.toLowerCase()
-            ? html`<p class="warn-note"><${Icon} name="alert" size=${16} /> The diary on this device belongs to ${S.acctEmail}. Signing in with a different email removes it from this device; it stays in that account.</p>`
+            ? html`<p class="warn-note"><${Icon} name="alert" size=${16} /> The diary on this device belongs to ${S.acctEmail}. Signing in with a different email removes it from this device; it stays in that account${unsynced ? ', except ' + unsynced + (unsynced === 1 ? ' change that hasn’t' : ' changes that haven’t') + ' synced yet' : ''}.</p>`
             : null}
-          <p class="muted small">We’ll email you a 6-digit code; there’s no password. If you’re new, this creates your account${S.mode === 'user' ? ', and the diary on this device goes into it' : ''}.</p>
+          <p class="muted small">We’ll email you a sign-in code; there’s no password. If you’re new, this creates your account${S.mode === 'user' && !(S.acctEmail && addr.toLowerCase() !== S.acctEmail.toLowerCase()) ? ', and the diary on this device goes into it' : ''}.</p>
         </form>
       <//>`;
     }
-    return html`<${Sheet} title="Enter your code" onClose=${onClose} onBack=${() => (setStep('email'), setErr(''))}>
+    return html`<${Sheet} title=${linkMode ? 'Paste your sign-in link' : 'Enter your code'} onClose=${onClose} onBack=${() => (setStep('email'), setErr(''))}>
       <form class="stack" onSubmit=${verify}>
-        <p class="lede">We sent a code to <b>${addr}</b>.</p>
-        <label class="field"><span class="lbl">Code</span>
-          <input id="si-code" class="input num code-in" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" value=${code} onInput=${(e) => setCode(e.target.value)} />
-        </label>
-        <button type="submit" class="btn btn-primary" disabled=${!okCode || busy}>${busy ? html`<${Spinner} /> Signing in…` : 'Sign in'}</button>
+        <p class="lede">We sent an email to <b>${addr}</b>.</p>
+        ${linkMode
+          ? html`<label class="field"><span class="lbl">Sign-in link</span>
+              <textarea id="si-code" class="input mono" rows="3" autocapitalize="off" spellcheck="false" placeholder="https://…" value=${code} onInput=${(e) => setCode(e.target.value)}></textarea>
+              <span class="hint">In the email, press and hold the sign-in link, choose Copy, then paste it here.</span>
+            </label>`
+          : html`<label class="field"><span class="lbl">Code</span>
+              <input id="si-code" class="input num code-in" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" value=${code} onInput=${(e) => setCode(e.target.value)} />
+            </label>`}
+        <button type="submit" class="btn btn-primary" disabled=${!okEntry || busy}>${busy ? html`<${Spinner} /> Signing in…` : 'Sign in'}</button>
         ${error}
         <div class="row gap8 wrap">
-          <button type="button" class="linkbtn" disabled=${wait > 0 || busy} onClick=${send}>${wait > 0 ? 'Send a new code in ' + wait + ' s' : 'Send a new code'}</button>
+          <button type="button" class="linkbtn" disabled=${wait > 0 || busy} onClick=${send}>${wait > 0 ? 'Send a new email in ' + wait + ' s' : 'Send a new email'}</button>
           <span class="muted small">·</span>
           <button type="button" class="linkbtn" onClick=${() => (setStep('email'), setErr(''))}>Use a different email</button>
         </div>
-        <p class="muted small">It can take a minute to arrive. If it doesn’t, check your spam folder.</p>
+        ${linkMode
+          ? html`<p class="muted small">On a computer or an Android phone, you can also just tap the link in the email. <button type="button" class="linkbtn" onClick=${() => (setLinkMode(false), setCode(''), setErr(''))}>Got a code instead?</button></p>`
+          : html`<p class="muted small">It can take a minute to arrive; check your spam folder too. <button type="button" class="linkbtn" onClick=${() => (setLinkMode(true), setCode(''), setErr(''))}>The email has a link instead of a code?</button></p>`}
       </form>
     <//>`;
   }
@@ -3055,6 +3110,7 @@
   // ---------------------------------------------------------------------------
   // Boot
   DV.boot();
+  finishLinkSignIn();
   AI.init();
   render(html`<${App} />`, document.getElementById('app'));
 })();
