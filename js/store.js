@@ -19,6 +19,8 @@
     library: {}, // id -> custom food or recipe
     uid: null,
     backend: 'local', // 'local' | 'cloud'
+    cloud: null, // while synced: 'claude' (the claude.ai artifact) | 'account' (email account, installable app)
+    syncSeq: 0, // the account's latest change number this device has seen
     sync: 'idle', // idle | saving | saved | error
     syncMsg: '',
   });
@@ -349,7 +351,7 @@
     clearTimeout(lsTimer);
     if (S.mode !== 'user') return;
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify({ v: 1, uid: S.uid, profile: S.profile, days: S.days, library: S.library, savedAt: Date.now() }));
+      localStorage.setItem(LS_KEY, JSON.stringify({ v: 1, uid: S.uid, profile: S.profile, days: S.days, library: S.library, dirty: Array.from(dirty), syncSeq: S.syncSeq || 0, savedAt: Date.now() }));
       if (S.backend === 'local') setSync('saved', 'Saved in this browser');
     } catch (e) {
       if (S.backend === 'local') setSync('error', 'This browser blocked saving. Export a backup from Profile so you don’t lose entries.');
@@ -387,31 +389,44 @@
   DV.uiPrefs = { read: readUIPrefs, write: writeUIPrefs };
 
   // ---------------------------------------------------------------------------
-  // Cloud: the artifact's database. Everything lives under data/users/<id>/, which only that person can read.
+  // Cloud sync. Documents are 'profile', 'days/<date>' and 'foods/<id>', each carrying u (its last edit
+  // time); the newest copy wins. Two backends share this queue: inside claude.ai, the artifact's database
+  // (everything under data/users/<id>/, which only that person can read); in the installable app, an email
+  // account (js/account.js). Changes the backend hasn't confirmed stay in `dirty`, which is saved with the
+  // diary, so edits made offline or just before the app closed still upload later.
+  const dirty = new Set();
   const cloud = {
-    db: null,
-    base: null,
+    backend: null, // { name: 'claude' | 'account', label, set(path, data), remove(path, u) }
     ready: false,
-    queue: new Map(), // path -> { data } | { del: true }
+    queue: new Map(), // path -> { data } | { del: true, u }
     inflight: new Set(),
     unsubs: [],
-    ref(path) {
-      const root = this.db.doc(this.base + '/profile');
-      if (path === 'profile') return root;
-      const i = path.indexOf('/');
-      return root.collection(path.slice(0, i)).doc(path.slice(i + 1));
-    },
+    failed: false,
+    retryTimer: 0,
+    retryDelay: 0,
     busy(path) {
       return this.queue.has(path) || this.inflight.has(path);
     },
     write(path, data) {
+      if (tracking()) dirty.add(path);
       if (!this.ready) return;
       this.queue.set(path, { data: clone(data) });
       this.pump();
     },
     remove(path) {
+      if (tracking()) dirty.add(path);
       if (!this.ready) return;
-      this.queue.set(path, { del: true });
+      this.queue.set(path, { del: true, u: Date.now() });
+      this.pump();
+    },
+    // Queue every unconfirmed change again, from the current local copy.
+    resend() {
+      if (!this.ready) return;
+      for (const path of dirty) {
+        if (this.busy(path)) continue;
+        const doc = localDoc(path);
+        this.queue.set(path, doc ? { data: clone(doc) } : { del: true, u: Date.now() });
+      }
       this.pump();
     },
     pump() {
@@ -424,43 +439,90 @@
       this.status();
     },
     async run(path, job) {
+      const backend = this.backend;
       this.inflight.add(path);
       this.status();
-      for (let attempt = 0; attempt < 2; attempt++) {
+      let ok = false;
+      let code = '';
+      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
         try {
-          const ref = this.ref(path);
-          if (job.del) await ref.delete();
-          else await ref.set(job.data);
-          this.failed = false;
-          break;
+          if (job.del) await backend.remove(path, job.u);
+          else await backend.set(path, job.data);
+          ok = true;
         } catch (e) {
-          const code = (e && e.code) || 'unavailable';
+          code = (e && e.code) || 'unavailable';
           // One quiet retry for a transient failure, unless a newer version is already waiting.
-          if (code === 'unavailable' && attempt === 0 && !this.queue.has(path)) {
-            await new Promise((r) => setTimeout(r, 800 + Math.random() * 1200));
-            continue;
-          }
-          this.failed = true;
-          if (code === 'quota_exceeded') setSync('error', 'Your saved data hit the storage limit. Delete unused custom foods or recipes.');
-          else if (['invalid_argument', 'not_granted', 'revoked', 'capability_disabled', 'capability_removed'].includes(code))
-            goLocal('This diary can’t be saved to your Claude account here, so changes are kept in this browser.');
-          else setSync('error', 'Couldn’t sync the last change. It’s kept in this browser and will retry with your next edit.');
-          break;
+          if (code !== 'unavailable' || attempt > 0 || this.queue.has(path)) break;
+          await new Promise((r) => setTimeout(r, 800 + Math.random() * 1200));
         }
       }
       this.inflight.delete(path);
+      if (backend !== this.backend) return; // disconnected meanwhile
+      if (ok) {
+        if (!this.queue.has(path)) {
+          dirty.delete(path);
+          writeLocalSoon();
+        }
+        this.failed = false;
+        this.retryDelay = 0;
+      } else this.fail(code);
       if (this.ready) this.pump();
+    },
+    fail(code) {
+      this.failed = true;
+      if (code === 'unauthenticated') return signedOutElsewhere();
+      if (code === 'quota_exceeded') return setSync('error', 'Your saved data hit the storage limit. Delete unused custom foods or recipes.');
+      if (code === 'too_large') return setSync('error', 'One day’s entries are too large to sync. Split them across meals or days.');
+      if (['invalid_argument', 'not_granted', 'revoked', 'capability_disabled', 'capability_removed'].includes(code))
+        return goLocal('This diary can’t be saved to your Claude account here, so changes are kept in this browser.');
+      // Offline or a hiccup: everything stays on this device and is sent again shortly.
+      setSync('error', 'Not synced yet. Changes are saved on this device and will sync when the connection is back.');
+      this.scheduleRetry();
+    },
+    scheduleRetry(now) {
+      clearTimeout(this.retryTimer);
+      this.retryDelay = now ? 0 : Math.min(300000, (this.retryDelay || 5000) * 2);
+      this.retryTimer = setTimeout(() => {
+        this.retryTimer = 0;
+        this.resend();
+      }, this.retryDelay);
     },
     status() {
       if (!this.ready) return;
       if (this.inflight.size || this.queue.size) setSync('saving', 'Saving…');
-      else if (!this.failed) setSync('saved', 'Synced to your Claude account');
+      else if (!this.failed) setSync('saved', 'Synced to ' + this.backend.label);
+    },
+    // Wait up to `ms` for queued changes to finish uploading.
+    async settle(ms) {
+      const end = Date.now() + ms;
+      while (this.ready && (this.queue.size || this.inflight.size) && Date.now() < end) await new Promise((r) => setTimeout(r, 100));
+    },
+    stop() {
+      this.ready = false;
+      this.backend = null;
+      this.queue.clear();
+      this.inflight.clear();
+      clearTimeout(this.retryTimer);
+      this.retryTimer = 0;
+      this.unsubs.forEach((u) => u());
+      this.unsubs = [];
+      stopPolling();
     },
   };
+  // Unconfirmed changes are tracked only while the diary syncs somewhere (or could, once signed in).
+  function tracking() {
+    return S.mode === 'user' && !!(S.cloud || (DV.account && DV.account.signedIn));
+  }
+  function localDoc(path) {
+    if (S.mode !== 'user') return null;
+    if (path === 'profile') return S.profile;
+    if (path.startsWith('days/')) return S.days[path.slice(5)] || null;
+    if (path.startsWith('foods/')) return S.library[path.slice(6)] || null;
+    return null;
+  }
   function goLocal(msg) {
-    cloud.ready = false;
-    cloud.unsubs.forEach((u) => u());
-    cloud.unsubs = [];
+    cloud.stop();
+    S.cloud = null;
     S.backend = 'local';
     writeLocal();
     setSync('error', msg);
@@ -472,63 +534,41 @@
     return (a.u || 0) >= (b.u || 0) ? a : b;
   }
 
-  async function connectCloud() {
-    const claude = window.claude;
-    if (!claude || typeof claude.use !== 'function') return;
-    let db, user;
-    try {
-      [db, user] = await Promise.all([claude.use('db'), claude.use('user')]);
-    } catch (e) {
-      return;
-    }
-    if (!db || !user) return;
-    let id = null;
-    try {
-      id = await user.id();
-    } catch (e) {}
-    if (!id) return;
-    cloud.db = db;
-    cloud.base = 'data/users/' + id;
-    const root = db.doc(cloud.base + '/profile');
-    const daysQ = root.collection('days').orderBy('date', 'desc').limit(1000);
-    const foodsQ = root.collection('foods').limit(1000);
-    setSync('saving', 'Connecting…');
-    let pSnap, dSnap, fSnap;
-    try {
-      [pSnap, dSnap, fSnap] = await Promise.all([root.get(), daysQ.get(), foodsQ.get()]);
-    } catch (e) {
-      setSync('error', 'Couldn’t reach your saved diary. Changes are kept in this browser for now.');
-      return;
-    }
-    const remoteProfile = pSnap.exists ? clone(pSnap.data()) : null;
-    const remoteDays = {};
-    dSnap.docs.forEach((d) => {
-      const x = d.data();
-      if (x && x.date) remoteDays[x.date] = clone(x);
-    });
-    const remoteLib = {};
-    fSnap.docs.forEach((d) => {
-      const x = d.data();
-      if (x && x.id) remoteLib[x.id] = clone(x);
-    });
+  // First connection: combine the stored copy with this device's, newest per document, and return what to
+  // upload. remote: { profile, days, library, gone: { path: u } } (gone: deleted in the account).
+  function mergeRemote(id, remote) {
     // Local data counts only if it belongs to this person (or was made before they had an id here).
-    const local = S.mode === 'user' && (!S.uid || S.uid === id) ? { profile: S.profile, days: S.days, library: S.library } : null;
+    if (S.mode === 'user' && S.uid && S.uid !== id) {
+      loadSample();
+      dirty.clear();
+    }
+    const gone = remote.gone || {};
+    const deletedAfter = (path, doc) => gone[path] != null && gone[path] >= ((doc && doc.u) || 0);
+    let local = S.mode === 'user' ? { profile: S.profile, days: S.days, library: S.library } : null;
+    // Everything was deleted from the account (Delete all data on another device) after this copy changed.
+    if (local && deletedAfter('profile', local.profile)) {
+      loadSample();
+      dirty.clear();
+      local = null;
+    }
     const uploads = [];
-    if (remoteProfile && remoteProfile.sex) {
-      const profile = newer(local && local.profile, remoteProfile);
-      const days = Object.assign({}, remoteDays);
-      const library = Object.assign({}, remoteLib);
+    if (remote.profile && remote.profile.sex) {
+      const profile = newer(local && local.profile, remote.profile);
+      const days = Object.assign({}, remote.days);
+      const library = Object.assign({}, remote.library);
       if (local) {
-        if (profile === local.profile && local.profile !== remoteProfile) uploads.push(['profile', profile]);
+        if (profile === local.profile && local.profile !== remote.profile) uploads.push(['profile', profile]);
         for (const [d, day] of Object.entries(local.days)) {
-          const r = remoteDays[d];
+          const r = remote.days[d];
+          if (deletedAfter('days/' + d, day)) continue;
           if (!r || (day.u || 0) > (r.u || 0)) {
             days[d] = day;
             uploads.push(['days/' + d, day]);
           }
         }
         for (const [lid, item] of Object.entries(local.library)) {
-          const r = remoteLib[lid];
+          const r = remote.library[lid];
+          if (deletedAfter('foods/' + lid, item)) continue;
           if (!r || (item.u || 0) > (r.u || 0)) {
             library[lid] = item;
             uploads.push(['foods/' + lid, item]);
@@ -545,12 +585,108 @@
       Object.entries(local.library).forEach(([lid, item]) => uploads.push(['foods/' + lid, item]));
     }
     S.uid = id;
+    return uploads;
+  }
+
+  // Apply one document from the account; true when something changed. data null means deleted there.
+  function applyDoc(path, data, u) {
+    u = u || 0;
+    if (path === 'profile') {
+      if (!data) {
+        if (S.mode !== 'user' || u < ((S.profile && S.profile.u) || 0)) return false;
+        loadSample(); // the diary was deleted from the account on another device
+        dirty.clear();
+        clearLocal();
+        return true;
+      }
+      if (!data.sex || (S.mode === 'user' && S.profile && u <= (S.profile.u || 0))) return false;
+      S.mode = 'user';
+      S.profile = clone(data);
+      return true;
+    }
+    if (S.mode !== 'user') return false;
+    const isDay = path.startsWith('days/');
+    const key = path.slice(isDay ? 5 : 6);
+    const cur = isDay ? S.days[key] : S.library[key];
+    if (data ? cur && u <= (cur.u || 0) : !cur || u < (cur.u || 0)) return false;
+    const next = Object.assign({}, isDay ? S.days : S.library);
+    if (data) next[key] = clone(data);
+    else delete next[key];
+    if (isDay) S.days = next;
+    else {
+      S.library = next;
+      recipeCache.delete(key);
+    }
+    return true;
+  }
+  function applyRows(rows) {
+    let changed = false;
+    for (const r of rows) {
+      S.syncSeq = Math.max(S.syncSeq || 0, r.seq || 0);
+      // A change of this device's that's still waiting to upload wins over what's stored.
+      if (cloud.busy(r.path) || dirty.has(r.path)) continue;
+      if (applyDoc(r.path, r.deleted ? null : r.data, r.u)) changed = true;
+    }
+    if (rows.length) writeLocalSoon();
+    if (changed) DV.emit();
+  }
+
+  // ---- Inside claude.ai: the artifact's database
+  function claudeBackend(db, base) {
+    const root = db.doc(base + '/profile');
+    const ref = (path) => {
+      if (path === 'profile') return root;
+      const i = path.indexOf('/');
+      return root.collection(path.slice(0, i)).doc(path.slice(i + 1));
+    };
+    return { name: 'claude', label: 'your Claude account', set: (path, data) => ref(path).set(data), remove: (path) => ref(path).delete() };
+  }
+  async function connectClaude() {
+    const claude = window.claude;
+    if (!claude || typeof claude.use !== 'function') return;
+    let db, user;
+    try {
+      [db, user] = await Promise.all([claude.use('db'), claude.use('user')]);
+    } catch (e) {
+      return;
+    }
+    if (!db || !user) return;
+    let id = null;
+    try {
+      id = await user.id();
+    } catch (e) {}
+    if (!id) return;
+    const base = 'data/users/' + id;
+    const root = db.doc(base + '/profile');
+    const daysQ = root.collection('days').orderBy('date', 'desc').limit(1000);
+    const foodsQ = root.collection('foods').limit(1000);
+    setSync('saving', 'Connecting…');
+    let pSnap, dSnap, fSnap;
+    try {
+      [pSnap, dSnap, fSnap] = await Promise.all([root.get(), daysQ.get(), foodsQ.get()]);
+    } catch (e) {
+      setSync('error', 'Couldn’t reach your saved diary. Changes are kept in this browser for now.');
+      return;
+    }
+    const remote = { profile: pSnap.exists ? clone(pSnap.data()) : null, days: {}, library: {} };
+    dSnap.docs.forEach((d) => {
+      const x = d.data();
+      if (x && x.date) remote.days[x.date] = clone(x);
+    });
+    fSnap.docs.forEach((d) => {
+      const x = d.data();
+      if (x && x.id) remote.library[x.id] = clone(x);
+    });
+    const uploads = mergeRemote(id, remote);
+    cloud.backend = claudeBackend(db, base);
+    S.cloud = 'claude';
     S.backend = 'cloud';
     cloud.ready = true;
     uploads.forEach(([p, d]) => cloud.write(p, d));
+    cloud.resend();
     if (S.mode === 'user') writeLocal();
     cloud.status();
-    if (!uploads.length) setSync('saved', 'Synced to your Claude account');
+    if (!uploads.length && !dirty.size) setSync('saved', 'Synced to your Claude account');
     subscribe(root, daysQ, foodsQ);
     DV.emit();
   }
@@ -617,6 +753,105 @@
       }, onErr)
     );
   }
+
+  // ---- The installable app: an email account (js/account.js)
+  function accountBackend(AC) {
+    return { name: 'account', label: 'your account', set: (path, data) => AC.put(path, data, data && data.u), remove: (path, u) => AC.remove(path, u) };
+  }
+  let connecting = false;
+  let reconnectTimer = 0;
+  let signingOut = false;
+  async function connectAccount() {
+    const AC = DV.account;
+    if (!AC || !AC.configured || !AC.signedIn || connecting) return;
+    connecting = true;
+    clearTimeout(reconnectTimer);
+    const id = AC.userId;
+    try {
+      // After the first time, only what changed since the last visit comes down.
+      const incremental = S.mode === 'user' && S.uid === id && S.syncSeq > 0;
+      setSync('saving', 'Connecting…');
+      const rows = await AC.fetchSince(incremental ? S.syncSeq : 0);
+      if (AC.userId !== id) return; // signed out meanwhile
+      cloud.stop();
+      let uploads = [];
+      if (incremental) applyRows(rows);
+      else {
+        const remote = { profile: null, days: {}, library: {}, gone: {} };
+        let seq = 0;
+        for (const r of rows) {
+          seq = Math.max(seq, r.seq || 0);
+          if (r.deleted) remote.gone[r.path] = r.u || 0;
+          else if (r.path === 'profile') remote.profile = r.data;
+          else if (r.path.startsWith('days/')) remote.days[r.path.slice(5)] = r.data;
+          else if (r.path.startsWith('foods/')) remote.library[r.path.slice(6)] = r.data;
+        }
+        uploads = mergeRemote(id, remote);
+        S.syncSeq = seq;
+        recipeCache.clear();
+      }
+      S.uid = id;
+      cloud.backend = accountBackend(AC);
+      S.cloud = 'account';
+      S.backend = 'cloud';
+      cloud.ready = true;
+      cloud.failed = false;
+      uploads.forEach(([p, d]) => cloud.write(p, d));
+      cloud.resend(); // anything changed offline or before the app was last closed
+      if (S.mode === 'user') writeLocal();
+      cloud.status();
+      startPolling();
+      DV.emit();
+    } catch (e) {
+      if (e && e.code === 'unauthenticated') signedOutElsewhere();
+      else {
+        setSync('error', 'Couldn’t reach your account. Changes are saved on this device and will sync when the connection is back.');
+        reconnectTimer = setTimeout(connectAccount, 30000);
+      }
+    } finally {
+      connecting = false;
+    }
+  }
+  // The account's sign-in ended (expired, or signed out on this device in another tab). Keep everything here.
+  function signedOutElsewhere() {
+    if (signingOut || !S.cloud) return;
+    goLocal('You’re signed out, so changes are saved on this device only. Sign in again from Profile to sync them.');
+  }
+  // Pick up changes from the person's other devices: every minute while open, and on coming back.
+  let pollTimer = 0;
+  let pulling = false;
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(() => document.visibilityState === 'visible' && pull(), 60000);
+  }
+  function stopPolling() {
+    clearInterval(pollTimer);
+    pollTimer = 0;
+  }
+  async function pull() {
+    if (pulling || !cloud.ready || !cloud.backend || cloud.backend.name !== 'account') return;
+    pulling = true;
+    const backend = cloud.backend;
+    try {
+      const rows = await DV.account.fetchSince(S.syncSeq || 0);
+      if (backend === cloud.backend) applyRows(rows);
+    } catch (e) {
+      if (e && e.code === 'unauthenticated') signedOutElsewhere();
+    } finally {
+      pulling = false;
+    }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (cloud.ready) pull();
+    else if (DV.account && DV.account.signedIn && !S.cloud) connectAccount();
+  });
+  window.addEventListener('online', () => {
+    if (cloud.ready) {
+      cloud.scheduleRetry(true);
+      pull();
+    } else if (DV.account && DV.account.signedIn) connectAccount();
+  });
 
   // ---------------------------------------------------------------------------
   // Persistence helpers used by actions
@@ -888,6 +1123,45 @@
       writeLocal();
       DV.emit();
     },
+    // Email accounts (installable app, js/account.js)
+    connectAccount,
+    unsynced: () => dirty.size,
+    // Upload what's pending, then sign out and clear this device. The diary stays in the account.
+    async signOut() {
+      signingOut = true;
+      try {
+        await cloud.settle(6000);
+        cloud.stop();
+        S.cloud = null;
+        await DV.account.signOut();
+        clearLocal();
+        dirty.clear();
+        loadSample();
+        S.syncSeq = 0;
+        setSync('idle', '');
+        DV.emit();
+      } finally {
+        signingOut = false;
+      }
+    },
+    // Delete the account and everything stored in it. This device keeps its copy as a local diary.
+    async deleteAccount() {
+      signingOut = true;
+      try {
+        await DV.account.deleteAccount();
+        cloud.stop();
+        S.cloud = null;
+        S.backend = 'local';
+        S.uid = null;
+        S.syncSeq = 0;
+        dirty.clear();
+        writeLocal();
+        setSync('saved', 'Saved in this browser');
+        DV.emit();
+      } finally {
+        signingOut = false;
+      }
+    },
     async resetAll() {
       const days = Object.keys(S.days);
       const lib = Object.keys(S.library);
@@ -896,6 +1170,7 @@
         lib.forEach((id) => cloud.remove('foods/' + id));
         cloud.remove('profile');
       }
+      if (!cloud.ready) dirty.clear();
       clearLocal();
       loadSample();
       DV.emit();
@@ -1072,6 +1347,8 @@
       S.days = local.days || {};
       S.library = local.library || {};
       S.uid = local.uid || null;
+      S.syncSeq = local.syncSeq || 0;
+      (local.dirty || []).forEach((p) => dirty.add(p));
       S.backend = 'local';
       S.sync = 'saved';
       S.syncMsg = 'Saved in this browser';
@@ -1082,7 +1359,13 @@
     const hash = (location.hash || '').slice(1);
     const views = DV.VIEWS;
     UI.view = views.includes(hash) ? hash : views.includes(prefs.view) ? prefs.view : 'diary';
-    connectCloud();
+    connectClaude();
+    if (DV.account) {
+      DV.account.onChange(() => {
+        if (!DV.account.signedIn && S.cloud === 'account') signedOutElsewhere();
+      });
+      connectAccount();
+    }
     DB.load();
   }
   DV.boot = boot;

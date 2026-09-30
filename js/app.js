@@ -177,7 +177,10 @@
   function SampleBanner() {
     return html`<div class="banner" role="note">
       <p><b>This is an example diary.</b> It belongs to a made-up person so you can see how tracking works. Nothing you change here is saved.</p>
-      <button type="button" class="btn btn-invert" onClick=${() => A.open({ type: 'onboard' })}>Start my diary</button>
+      <div class="row gap8 wrap">
+        ${canSignIn() ? html`<button type="button" class="btn btn-quiet" onClick=${() => A.open({ type: 'signin' })}>Sign in</button>` : null}
+        <button type="button" class="btn btn-invert" onClick=${() => A.open({ type: 'onboard' })}>Start my diary</button>
+      </div>
     </div>`;
   }
   // Installable-app build only (DV.pwa, from pwa/pwa.js): a nudge on the diary to put the app on the
@@ -250,6 +253,8 @@
         return html`<${WeightSheet} key=${k} date=${sh.date} onClose=${close} />`;
       case 'paste':
         return html`<${PasteSheet} key=${k} onClose=${close} />`;
+      case 'signin':
+        return html`<${SignInSheet} key=${k} onClose=${close} />`;
       case 'onboard':
         return html`<${OnboardSheet} key=${k} onClose=${close} />`;
       case 'review':
@@ -2712,11 +2717,181 @@
       }}>Start my diary</button>`}>
       <div class="stack">
         <p class="lede">A few details set your calorie goal and the vitamin and mineral targets for your age and sex. You can change any of it later.</p>
+        ${canSignIn() ? html`<p class="small">Already have an account? <button type="button" class="linkbtn" onClick=${() => A.open({ type: 'signin' })}>Sign in instead</button></p>` : null}
         <div class="field"><span class="lbl">Units</span><${Seg} value=${p.units} options=${[['imperial', 'lb, ft, fl oz'], ['metric', 'kg, cm, mL']]} onChange=${(v) => set({ units: v })} label="Units" /></div>
         <${ProfileForm} p=${p} set=${set} weightKg=${kg} setWeightKg=${setKg} compact />
         ${ok ? html`<${TargetsPreview} p=${p} weightKg=${kg} />` : html`<p class="muted small">Enter your height and weight to see your targets.</p>`}
         <p class="muted small">Your diary is saved to your Claude account where available, so it follows you across devices. Only you can see it.</p>
       </div>
+    <//>`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Email accounts (installable app only; js/account.js). Sign-in is a one-time code sent by email.
+  const canSignIn = () => !!(DV.account && DV.account.configured && !DV.account.signedIn);
+  function accountMessage(e) {
+    switch (e && e.code) {
+      case 'rate_limited':
+        return 'Too many codes have been sent. Wait a few minutes, then try again.';
+      case 'bad_code':
+        return 'That code is wrong or has expired. Check the newest email, or send a new code.';
+      case 'bad_email':
+        return 'That doesn’t look like an email address. Check it and try again.';
+      case 'not_authorized':
+        return 'The app can’t email this address yet: its email service only sends to addresses its owner has approved.';
+      case 'unavailable':
+        return 'Couldn’t reach the account service. Check your connection and try again.';
+      default:
+        return (e && e.message) || 'Something went wrong. Try again.';
+    }
+  }
+
+  function AccountCard() {
+    const AC = DV.account;
+    if (!AC || !AC.configured) return null;
+    if (!AC.signedIn) {
+      return html`<section class="panel pad-panel acct" aria-label="Account">
+        <div class="acct-row">
+          <div>
+            <h2 class="h2">Account</h2>
+            <p class="muted small">Sign in with your email to keep your diary in your account and use it on your phone and computer. There’s no password: we email you a code.</p>
+          </div>
+          <button type="button" class="btn btn-primary" onClick=${() => A.open({ type: 'signin' })}><${Icon} name="user" size=${16} /> Sign in</button>
+        </div>
+      </section>`;
+    }
+    const signOut = () => {
+      const n = A.unsynced();
+      A.open({
+        type: 'confirm',
+        title: 'Sign out?',
+        body:
+          'Your diary stays in your account. This device goes back to the example diary until you sign in again.' +
+          (n ? ' ' + n + (n === 1 ? ' change hasn’t' : ' changes haven’t') + ' synced yet. They’re sent first if there’s a connection; otherwise they’re lost.' : ''),
+        confirm: 'Sign out',
+        danger: n > 0,
+        run: () => A.signOut().then(() => A.toast('Signed out')),
+      });
+    };
+    const del = () =>
+      A.open({
+        type: 'confirm',
+        title: 'Delete your account?',
+        body: 'This permanently deletes the account for ' + AC.email + ' and the diary stored in it. This device keeps its own copy of your diary.',
+        confirm: 'Delete account',
+        danger: true,
+        run: () =>
+          A.deleteAccount()
+            .then(() => A.toast('Account deleted'))
+            .catch((e) => A.toast(accountMessage(e), { ms: 7000 })),
+      });
+    return html`<section class="panel pad-panel acct" aria-label="Account">
+      <div class="acct-row">
+        <div>
+          <h2 class="h2">Account</h2>
+          <p class="acct-email">Signed in as <b>${AC.email}</b></p>
+          <p class="row gap8"><${SyncStatus} /></p>
+        </div>
+        <div class="row gap8 wrap">
+          <button type="button" class="btn" onClick=${signOut}>Sign out</button>
+          <button type="button" class="btn btn-danger" onClick=${del}><${Icon} name="trash" size=${16} /> Delete account</button>
+        </div>
+      </div>
+      <p class="muted small top8">Your diary is kept in your account and syncs to every device where you sign in with this email. The database lets each account read only its own entries.</p>
+    </section>`;
+  }
+
+  function SignInSheet({ onClose }) {
+    const AC = DV.account;
+    const [step, setStep] = useState('email'); // email | code
+    const [email, setEmail] = useState(() => DV.uiPrefs.read().lastEmail || '');
+    const [code, setCode] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState('');
+    const [sentAt, setSentAt] = useState(0);
+    const [now, setNow] = useState(Date.now());
+    useEffect(() => {
+      if (step !== 'code') return;
+      const el = document.getElementById('si-code');
+      if (el) el.focus();
+      const t = setInterval(() => setNow(Date.now()), 1000);
+      return () => clearInterval(t);
+    }, [step]);
+    if (!AC || !AC.configured) return html`<${Sheet} title="Sign in" onClose=${onClose}><p>Accounts aren’t set up for this copy of the app.</p><//>`;
+    const addr = email.trim();
+    const okEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addr);
+    const digits = code.replace(/\D/g, '');
+    const okCode = /^\d{6,10}$/.test(digits);
+    const wait = Math.max(0, 60 - Math.floor((now - sentAt) / 1000));
+    const send = async (e) => {
+      if (e) e.preventDefault();
+      if (!okEmail || busy) return;
+      setBusy(true);
+      setErr('');
+      try {
+        await AC.sendCode(addr);
+        DV.uiPrefs.write({ lastEmail: addr });
+        setCode('');
+        setSentAt(Date.now());
+        setNow(Date.now());
+        setStep('code');
+      } catch (x) {
+        setErr(accountMessage(x));
+      }
+      setBusy(false);
+    };
+    const verify = async (e) => {
+      if (e) e.preventDefault();
+      if (!okCode || busy) return;
+      setBusy(true);
+      setErr('');
+      const hadDiary = S.mode === 'user';
+      try {
+        await AC.verifyCode(addr, digits);
+      } catch (x) {
+        setErr(accountMessage(x));
+        setBusy(false);
+        return;
+      }
+      await A.connectAccount();
+      if (S.mode === 'user') {
+        onClose();
+        A.toast('Signed in as ' + AC.email + (hadDiary ? '. This device’s diary is now in your account.' : '.'), { ms: 6000 });
+      } else {
+        // A new account: set up the diary next.
+        A.open({ type: 'onboard' });
+        A.toast('Signed in as ' + AC.email + '. Set up your diary to start.', { ms: 6000 });
+      }
+    };
+    const error = err ? html`<p class="error" role="alert"><${Icon} name="alert" size=${16} /> ${err}</p>` : null;
+    if (step === 'email') {
+      return html`<${Sheet} title="Sign in" onClose=${onClose} focus="#si-email">
+        <form class="stack" onSubmit=${send}>
+          <p class="lede">Keep your diary in your account and use it on your phone and computer.</p>
+          <label class="field"><span class="lbl">Email</span>
+            <input id="si-email" class="input" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" value=${email} onInput=${(e) => setEmail(e.target.value)} />
+          </label>
+          <button type="submit" class="btn btn-primary" disabled=${!okEmail || busy}>${busy ? html`<${Spinner} /> Sending…` : 'Email me a code'}</button>
+          ${error}
+          <p class="muted small">We’ll email you a 6-digit code; there’s no password. If you’re new, this creates your account${S.mode === 'user' ? ', and the diary on this device goes into it' : ''}.</p>
+        </form>
+      <//>`;
+    }
+    return html`<${Sheet} title="Enter your code" onClose=${onClose} onBack=${() => (setStep('email'), setErr(''))}>
+      <form class="stack" onSubmit=${verify}>
+        <p class="lede">We sent a code to <b>${addr}</b>.</p>
+        <label class="field"><span class="lbl">Code</span>
+          <input id="si-code" class="input num code-in" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12" value=${code} onInput=${(e) => setCode(e.target.value)} />
+        </label>
+        <button type="submit" class="btn btn-primary" disabled=${!okCode || busy}>${busy ? html`<${Spinner} /> Signing in…` : 'Sign in'}</button>
+        ${error}
+        <div class="row gap8 wrap">
+          <button type="button" class="linkbtn" disabled=${wait > 0 || busy} onClick=${send}>${wait > 0 ? 'Send a new code in ' + wait + ' s' : 'Send a new code'}</button>
+          <span class="muted small">·</span>
+          <button type="button" class="linkbtn" onClick=${() => (setStep('email'), setErr(''))}>Use a different email</button>
+        </div>
+        <p class="muted small">It can take a minute to arrive. If it doesn’t, check your spam folder.</p>
+      </form>
     <//>`;
   }
 
@@ -2741,7 +2916,9 @@
     return html`<section class="panel pad-panel top16" aria-label="Get the app">
       <h2 class="h2">Get the app</h2>
       ${body}
-      <p class="muted small top8">The app keeps its diary on this device${P.ios ? ', and on iPhone the Home Screen app’s diary is separate from Safari’s' : ''}. To move entries between the app, a browser or another device, use Copy backup and Paste a backup below, or Back up and Restore backup with a file.</p>
+      <p class="muted small top8">${canSignIn() || S.cloud === 'account'
+        ? 'Sign in with the same email on each device (Account, above) and your diary syncs between them.'
+        : html`The app keeps its diary on this device${P.ios ? ', and on iPhone the Home Screen app’s diary is separate from Safari’s' : ''}. To move entries between the app, a browser or another device, use Copy backup and Paste a backup below, or Back up and Restore backup with a file.`}</p>
     </section>`;
   }
 
@@ -2770,6 +2947,7 @@
     };
     return html`<div class="view profile">
       <header class="view-h"><h1>Profile & targets</h1><p class="muted">${sample ? 'Showing the example person. Start your own diary to enter your details.' : 'Changes update your targets right away.'}</p></header>
+      <${AccountCard} />
       <div class="profile-grid">
         <section class="panel pad-panel" aria-label="About you">
           <h2 class="h2">About you</h2>
@@ -2837,7 +3015,9 @@
         <section class="panel pad-panel" aria-label="Your data">
           <h2 class="h2">Your data</h2>
           <p class="row gap8"><${SyncStatus} /></p>
-          <p class="muted small">${S.backend === 'cloud'
+          <p class="muted small">${S.cloud === 'account'
+            ? 'Your diary is kept in your account and on this device, and syncs to every device where you sign in.'
+            : S.backend === 'cloud'
             ? 'Your diary is stored with this page in your Claude account, in a private space only you can read, and syncs across your devices.'
             : 'Your diary is saved in this browser. Export a backup now and then so you don’t lose it if browser data is cleared.'}</p>
           ${DV.pwa && DV.pwa.ios && !DV.pwa.installed && !sample
@@ -2855,7 +3035,7 @@
           ${sample
             ? null
             : html`<button type="button" class="btn btn-danger top16" onClick=${() =>
-                A.open({ type: 'confirm', title: 'Delete all data?', body: 'This permanently deletes your diary, foods, recipes and profile' + (S.backend === 'cloud' ? ' from your Claude account and this browser' : ' from this browser') + '. Export a backup first if you might want it later.', confirm: 'Delete everything', danger: true, run: () => A.resetAll().then(() => A.toast('All data deleted')) })}><${Icon} name="trash" size=${16} /> Delete all data</button>`}
+                A.open({ type: 'confirm', title: 'Delete all data?', body: 'This permanently deletes your diary, foods, recipes and profile' + (S.cloud === 'account' ? ' from your account and this device' : S.backend === 'cloud' ? ' from your Claude account and this browser' : ' from this browser') + '. Export a backup first if you might want it later.', confirm: 'Delete everything', danger: true, run: () => A.resetAll().then(() => A.toast('All data deleted')) })}><${Icon} name="trash" size=${16} /> Delete all data</button>`}
         </section>
         <section class="panel pad-panel about" aria-label="About the numbers">
           <h2 class="h2">About the numbers</h2>

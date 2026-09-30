@@ -23,6 +23,19 @@ Open **https://jjnesk1-ship-it.github.io/daily-value/** on your phone.
 
 The installed app opens full screen from its icon and works offline after the first visit. Its diary is saved on that device only. To move it to another device, or from Safari into the Home Screen app, use **Copy backup** and **Paste a backup** in Profile, or **Back up** and **Restore backup** with a file.
 
+## Email accounts
+
+In the installable app, signing in with an email keeps a diary in an account and syncs it between devices. Sign-in is a 6-digit code sent by email, with no password. The claude.ai version keeps syncing through the Claude account instead.
+
+Accounts use a free [Supabase](https://supabase.com) project and stay switched off until `pwa/config.js` has its details:
+
+1. Create a project on supabase.com.
+2. In **SQL Editor**, run [`supabase/schema.sql`](supabase/schema.sql). It creates the `dv_docs` table, the row-level security that limits each account to its own rows, and a function for deleting an account.
+3. In **Authentication → Emails**, edit the **Magic Link** template so the email shows the code, for example `<p>Your Daily Value code: <strong>{{ .Token }}</strong></p>`.
+4. In **Project Settings → API**, copy the Project URL and the publishable (anon) key into `pwa/config.js`, then publish (see below).
+
+Supabase's built-in email service is meant for testing: it sends only a few emails an hour and may only deliver to your project team's addresses. For other people to sign in, add your own email provider under **Authentication → Emails → SMTP settings**. Free projects are paused after a week without use; restore them from the Supabase dashboard.
+
 ## Run it locally
 
 ```bash
@@ -47,7 +60,8 @@ Outside claude.ai the diary is saved in the browser (localStorage), and the Clau
 | `js/app.js` | Views and sheets |
 | `data/foods.txt` | USDA SR Legacy and FNDDS foods |
 | `data/b/` | Brand-name products: search index, records, barcodes and brands |
-| `pwa/` | What the installable app adds: manifest, icons, service worker and install prompts |
+| `pwa/` | What the installable app adds: manifest, icons, service worker, install prompts, email accounts (`account.js`) and settings (`config.js`) |
+| `supabase/schema.sql` | Database setup for email accounts |
 | `tools/` | Scripts that build the data files and the installable site |
 
 ## Publishing the installable app
@@ -58,6 +72,8 @@ The GitHub Pages site is built from the same files, with the pieces in `pwa/` ad
 python tools/build_site.py --publish
 git push origin gh-pages
 ```
+
+To try the build first, run `python tools/serve_site.py` and open http://localhost:8766.
 
 The build writes `_site/` and commits it to the `gh-pages` branch, which GitHub Pages serves. When the app's files change, installed copies offer a **Reload** the next time they open; the food data they've stored is kept unless the data files changed too.
 
