@@ -10,6 +10,7 @@ Usage:
                                         (then run: git push origin gh-pages)
 """
 
+import base64
 import hashlib
 import html
 import json
@@ -48,7 +49,8 @@ HEAD = """<!doctype html>
 """
 
 APP_SCRIPT = '<script src="js/app.js"></script>'
-PWA_SCRIPT = '<script src="js/pwa.js"></script>'
+# Settings, email accounts and install support, loaded before the app first draws.
+PWA_SCRIPTS = ["js/config.js", "js/account.js", "js/pwa.js"]
 # Stored when the app is installed; the other data files are stored the first time they're used.
 DATA_AT_INSTALL = ["data/foods.txt", "data/b/meta.json"]
 # Written with LF line endings whatever the checkout uses, so the same commit always builds the same bytes.
@@ -92,7 +94,26 @@ def version(paths, hashes):
     return hashlib.sha256("".join(p + hashes[p] for p in paths).encode("utf-8")).hexdigest()[:12]
 
 
+def check_key():
+    """Refuse to publish a secret Supabase key: it bypasses row-level security, and this site is public."""
+    with open(os.path.join(PWA, "config.js"), encoding="utf-8") as f:
+        m = re.search(r"supabaseKey:\s*'([^']*)'", f.read())
+    key = m.group(1) if m else ""
+    if not key or key.startswith("sb_publishable_"):
+        return
+    role = None
+    parts = key.split(".")
+    if len(parts) == 3:
+        try:
+            role = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))).get("role")
+        except ValueError:
+            pass
+    if role != "anon":
+        sys.exit("pwa/config.js has a secret Supabase key. Use the publishable key (sb_publishable_...) and rotate the secret one.")
+
+
 def build():
+    check_key()
     if os.path.isdir(OUT):
         shutil.rmtree(OUT)
     os.makedirs(OUT)
@@ -106,15 +127,15 @@ def build():
     for p in tracked("pwa/icons"):
         icons.append("icons/" + os.path.basename(p))
         put(p, icons[-1])
-    put("pwa/pwa.js", "js/pwa.js")
+    for dest in PWA_SCRIPTS:
+        put("pwa/" + os.path.basename(dest), dest)
     put("pwa/manifest.webmanifest", "manifest.webmanifest")
 
     with open(os.path.join(ROOT, "index.html"), encoding="utf-8") as f:
         page = f.read().replace("\r\n", "\n")
     if page.count(APP_SCRIPT) != 1:
         sys.exit("index.html must load js/app.js exactly once")
-    # pwa.js sets DV.pwa before the app first draws.
-    page = page.replace(APP_SCRIPT, PWA_SCRIPT + "\n" + APP_SCRIPT)
+    page = page.replace(APP_SCRIPT, "".join('<script src="%s"></script>\n' % f for f in PWA_SCRIPTS) + APP_SCRIPT)
     # Load CDN files with CORS, so the service worker can check and store real responses (not opaque ones).
     for old, new in (
         ('<script src="https://cdn.jsdelivr.net/', '<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/'),
@@ -134,7 +155,7 @@ def build():
     if not cdn or not cdn[0][1]:
         sys.exit("couldn't find the page's library scripts in index.html")
 
-    app_files = ["index.html", "manifest.webmanifest"] + sorted(["js/pwa.js"] + js_files) + icons
+    app_files = ["index.html", "manifest.webmanifest"] + sorted(PWA_SCRIPTS + js_files) + icons
     hashes = {p: sha256(p) for p in app_files + data_files}
     with open(os.path.join(PWA, "sw.js"), encoding="utf-8") as f:
         sw = f.read()

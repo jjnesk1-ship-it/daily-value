@@ -23,6 +23,26 @@ Open **https://jjnesk1-ship-it.github.io/daily-value/** on your phone.
 
 The installed app opens full screen from its icon and works offline after the first visit. Its diary is saved on that device only. To move it to another device, or from Safari into the Home Screen app, use **Copy backup** and **Paste a backup** in Profile, or **Back up** and **Restore backup** with a file.
 
+## Email accounts
+
+In the installable app, signing in with an email keeps a diary in an account and syncs it between devices. People sign in with a one-time code from an email; there's no password. The claude.ai version keeps syncing through the Claude account instead.
+
+Accounts use a free [Supabase](https://supabase.com) project and stay switched off until `pwa/config.js` has its details:
+
+1. **Create a project** on supabase.com.
+2. **Set up the database:** in **SQL Editor**, run [`supabase/schema.sql`](supabase/schema.sql). It creates the `dv_docs` table, the row-level security that limits each account to its own rows, a storage limit per account (5,000 documents, 20 MB), and a function for deleting an account.
+3. **Point sign-in links at the app:** in **Authentication → URL Configuration**, set **Site URL** to `https://jjnesk1-ship-it.github.io/daily-value/`.
+4. **Connect the app:** click **Connect** at the top of the project page (or open **Settings → API Keys**) and copy the **Project URL** and the **Publishable key** (`sb_publishable_…`) into `pwa/config.js`, then publish (see below). Never use a secret key: the app refuses one, and one committed to this public repo would need rotating.
+
+**Codes or links.** Supabase's default emails carry a sign-in link rather than a code, and new free projects can't change their email templates until they use their own email provider. The app accepts either way:
+
+- **A code** works everywhere. To send codes, set up your own email provider (next paragraph), then in **Authentication → Emails → Templates** put `{{ .Token }}` in both **Confirm sign up** and **Magic link or OTP** (for example `<p>Your Daily Value code: <strong>{{ .Token }}</strong></p>`) and remove the link. Codes may be 6 or 8 digits; set **Email OTP Length** under **Authentication → Sign In / Providers → Email** if you prefer.
+- **A link** can be tapped on a computer or an Android phone. The installed iPhone app keeps its own storage, so there, copy the link from the email and paste it into the app's sign-in screen.
+
+**Who can sign in.** Without your own email provider, Supabase only emails the members of your Supabase team (so, you), about 2 emails an hour. For anyone else to sign in, add a provider such as Resend, Postmark or Amazon SES under **Authentication → Emails → SMTP Settings**. You'll need a domain you can verify with it. Before opening sign-in to others, also consider turning on CAPTCHA under **Authentication → Attack Protection**, and serving the app from its own domain rather than a shared `github.io` address.
+
+**Free-plan limits.** A project is paused after about a week without use (normal syncing counts as use); resume it from the Supabase dashboard and nothing is lost.
+
 ## Run it locally
 
 ```bash
@@ -47,7 +67,8 @@ Outside claude.ai the diary is saved in the browser (localStorage), and the Clau
 | `js/app.js` | Views and sheets |
 | `data/foods.txt` | USDA SR Legacy and FNDDS foods |
 | `data/b/` | Brand-name products: search index, records, barcodes and brands |
-| `pwa/` | What the installable app adds: manifest, icons, service worker and install prompts |
+| `pwa/` | What the installable app adds: manifest, icons, service worker, install prompts, email accounts (`account.js`) and settings (`config.js`) |
+| `supabase/schema.sql` | Database setup for email accounts |
 | `tools/` | Scripts that build the data files and the installable site |
 
 ## Publishing the installable app
@@ -58,6 +79,8 @@ The GitHub Pages site is built from the same files, with the pieces in `pwa/` ad
 python tools/build_site.py --publish
 git push origin gh-pages
 ```
+
+To try the build first, run `python tools/serve_site.py` and open http://localhost:8766.
 
 The build writes `_site/` and commits it to the `gh-pages` branch, which GitHub Pages serves. When the app's files change, installed copies offer a **Reload** the next time they open; the food data they've stored is kept unless the data files changed too.
 
