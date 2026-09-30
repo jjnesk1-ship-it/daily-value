@@ -21,6 +21,7 @@
     backend: 'local', // 'local' | 'cloud'
     cloud: null, // while synced: 'claude' (the claude.ai artifact) | 'account' (email account, installable app)
     syncSeq: 0, // the account's latest change number this device has seen
+    acctEmail: '', // the email account this device's diary belongs to
     sync: 'idle', // idle | saving | saved | error
     syncMsg: '',
   });
@@ -350,8 +351,13 @@
   function writeLocal() {
     clearTimeout(lsTimer);
     if (S.mode !== 'user') return;
+    // While synced with an email account, the diary on this device belongs to that account.
+    if (S.cloud === 'account' && DV.account && DV.account.signedIn) {
+      S.uid = DV.account.userId;
+      S.acctEmail = DV.account.email;
+    }
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify({ v: 1, uid: S.uid, profile: S.profile, days: S.days, library: S.library, dirty: Array.from(dirty), syncSeq: S.syncSeq || 0, savedAt: Date.now() }));
+      localStorage.setItem(LS_KEY, JSON.stringify({ v: 1, uid: S.uid, profile: S.profile, days: S.days, library: S.library, dirty: Array.from(dirty), syncSeq: S.syncSeq || 0, acctEmail: S.acctEmail || '', savedAt: Date.now() }));
       if (S.backend === 'local') setSync('saved', 'Saved in this browser');
     } catch (e) {
       if (S.backend === 'local') setSync('error', 'This browser blocked saving. Export a backup from Profile so you don’t lose entries.');
@@ -791,6 +797,7 @@
         recipeCache.clear();
       }
       S.uid = id;
+      S.acctEmail = AC.email;
       cloud.backend = accountBackend(AC);
       S.cloud = 'account';
       S.backend = 'cloud';
@@ -1153,6 +1160,7 @@
         S.cloud = null;
         S.backend = 'local';
         S.uid = null;
+        S.acctEmail = '';
         S.syncSeq = 0;
         dirty.clear();
         writeLocal();
@@ -1329,6 +1337,7 @@
       },
     };
     S.uid = null;
+    S.acctEmail = '';
     S.backend = 'local';
   }
   function defaultUnits() {
@@ -1348,6 +1357,7 @@
       S.library = local.library || {};
       S.uid = local.uid || null;
       S.syncSeq = local.syncSeq || 0;
+      S.acctEmail = local.acctEmail || '';
       (local.dirty || []).forEach((p) => dirty.add(p));
       S.backend = 'local';
       S.sync = 'saved';

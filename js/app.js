@@ -2804,7 +2804,7 @@
   function SignInSheet({ onClose }) {
     const AC = DV.account;
     const [step, setStep] = useState('email'); // email | code
-    const [email, setEmail] = useState(() => DV.uiPrefs.read().lastEmail || '');
+    const [email, setEmail] = useState(() => S.acctEmail || DV.uiPrefs.read().lastEmail || '');
     const [code, setCode] = useState('');
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
@@ -2873,6 +2873,9 @@
           </label>
           <button type="submit" class="btn btn-primary" disabled=${!okEmail || busy}>${busy ? html`<${Spinner} /> Sending…` : 'Email me a code'}</button>
           ${error}
+          ${S.mode === 'user' && S.acctEmail && okEmail && addr.toLowerCase() !== S.acctEmail.toLowerCase()
+            ? html`<p class="warn-note"><${Icon} name="alert" size=${16} /> The diary on this device belongs to ${S.acctEmail}. Signing in with a different email removes it from this device; it stays in that account.</p>`
+            : null}
           <p class="muted small">We’ll email you a 6-digit code; there’s no password. If you’re new, this creates your account${S.mode === 'user' ? ', and the diary on this device goes into it' : ''}.</p>
         </form>
       <//>`;
