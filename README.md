@@ -36,10 +36,15 @@ Accounts use a free [Supabase](https://supabase.com) project and stay switched o
 
 **Codes or links.** Supabase's default emails carry a sign-in link rather than a code, and new free projects can't change their email templates until they use their own email provider. The app accepts either way:
 
-- **A code** works everywhere. To send codes, set up your own email provider (next paragraph), then in **Authentication → Emails → Templates** put `{{ .Token }}` in both **Confirm sign up** and **Magic link or OTP** (for example `<p>Your Daily Value code: <strong>{{ .Token }}</strong></p>`) and remove the link. Codes may be 6 or 8 digits; set **Email OTP Length** under **Authentication → Sign In / Providers → Email** if you prefer.
+- **A code** works everywhere. To send codes, set up your own email provider (next paragraph), then in **Authentication → Emails → Templates** put `{{ .Token }}` in both **Confirm sign up** and **Magic link or OTP** and remove the link. For example, subject `{{ .Token }} is your Daily Value code` (so the code shows in the notification) and body `<p>Your Daily Value code: <strong>{{ .Token }}</strong></p>`. New projects send 8-digit codes; set **Email OTP length** to 6 under **Authentication → Sign In / Providers → Email** for shorter ones.
 - **A link** can be tapped on a computer or an Android phone. The installed iPhone app keeps its own storage, so there, copy the link from the email and paste it into the app's sign-in screen.
 
-**Who can sign in.** Without your own email provider, Supabase only emails the members of your Supabase team (so, you), about 2 emails an hour. For anyone else to sign in, add a provider such as Resend, Postmark or Amazon SES under **Authentication → Emails → SMTP Settings**. You'll need a domain you can verify with it. Before opening sign-in to others, also consider turning on CAPTCHA under **Authentication → Attack Protection**, and serving the app from its own domain rather than a shared `github.io` address.
+**Who can sign in.** Without your own email provider, Supabase only emails the members of your Supabase team (so, you), about 2 emails an hour. For anyone else to sign in, set one up under **Authentication → Emails → SMTP Settings**; Supabase then allows 30 emails an hour (adjustable under **Authentication → Rate Limits**).
+
+- **Without a domain, use a Gmail account.** Turn on 2-Step Verification for it, create an app password at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords), and enter: sender email and username = the Gmail address, password = the app password, host `smtp.gmail.com`, port `465`. Gmail sends up to about 500 emails a day, and every sign-in email comes from that address. Changing the Google account's password cancels the app password, so make a new one and save it in Supabase again.
+- **With a domain**, a provider such as Resend, Postmark or Amazon SES delivers more reliably.
+
+Before opening sign-in to others, also consider turning on CAPTCHA under **Authentication → Attack Protection**, and serving the app from its own domain rather than a shared `github.io` address.
 
 **Free-plan limits.** A project is paused after about a week without use (normal syncing counts as use); resume it from the Supabase dashboard and nothing is lost.
 
